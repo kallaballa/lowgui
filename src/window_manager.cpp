@@ -14,11 +14,10 @@ void WindowManager::createWindow(const std::string& name, int flags) {
     std::lock_guard<std::mutex> lock(mtx_);
     auto it = windows_.find(name);
     if (it == windows_.end()) {
-        WindowData wd;
-        wd.name = name;
-        wd.title = name;
-        wd.flags = flags;
-        windows_[name] = std::move(wd);
+        // Use emplace to construct in-place, avoiding copy/move operations
+        windows_.emplace(std::piecewise_construct,
+                         std::forward_as_tuple(name),
+                         std::forward_as_tuple(name, name, flags));
     }
 }
 

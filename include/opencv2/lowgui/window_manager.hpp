@@ -13,9 +13,16 @@ namespace lowgui {
 namespace detail {
 
 struct ImageBuffer {
-    std::mutex mtx;
+    mutable std::mutex mtx;
     cv::UMat image;
     bool has_image = false;
+
+    // Delete copy/move operations because mutex is non-copyable and non-movable
+    ImageBuffer() = default;
+    ImageBuffer(const ImageBuffer&) = delete;
+    ImageBuffer& operator=(const ImageBuffer&) = delete;
+    ImageBuffer(ImageBuffer&&) = delete;
+    ImageBuffer& operator=(ImageBuffer&&) = delete;
 };
 
 struct WindowData {
@@ -24,6 +31,17 @@ struct WindowData {
     int flags;
     ImageBuffer buffer;
     cv::Rect viewport;
+
+    // Delete copy/move operations because ImageBuffer is non-copyable/non-movable
+    WindowData() = default;
+    WindowData(const WindowData&) = delete;
+    WindowData& operator=(const WindowData&) = delete;
+    WindowData(WindowData&&) = delete;
+    WindowData& operator=(WindowData&&) = delete;
+
+    // Constructor for easy creation
+    WindowData(std::string n, std::string t, int f) 
+        : name(std::move(n)), title(std::move(t)), flags(f), buffer(), viewport() {}
 };
 
 class WindowManager {

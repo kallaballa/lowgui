@@ -10,7 +10,9 @@ namespace cv {
 namespace lowgui {
 namespace detail {
 
-class LowguiRootPlan : public cv::v4d::V4DPlan {
+using namespace cv::v4d;
+
+class LowguiRootPlan : public V4DPlan {
     std::vector<std::string> window_names_;
     std::vector<cv::Ptr<WindowPlan>> window_plans_;
     std::vector<cv::Rect> viewports_;

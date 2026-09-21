@@ -8,7 +8,9 @@ namespace cv {
 namespace lowgui {
 namespace detail {
 
-class WindowPlan : public cv::v4d::V4DPlan {
+using namespace cv::v4d;
+
+class WindowPlan : public V4DPlan {
     std::string window_name_;
     cv::UMat rgba_;
     Property<cv::Size> size_ = P<cv::Size>(V4D::Keys::SIZE);
