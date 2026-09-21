@@ -11,9 +11,9 @@ if(NOT (TARGET ${the_module}))
   ocv_module_include_directories(
     "${CMAKE_CURRENT_LIST_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    "${OPENCV_EXTRA_MODULES_PATH}/v4d/third/imgui"
-    "${OPENCV_EXTRA_MODULES_PATH}/v4d/third/imgui/backends/"
-    "${OPENCV_EXTRA_MODULES_PATH}/v4d/third/nanovg/src/"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../Plan-V4D/modules/v4d/third/imgui"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../Plan-V4D/modules/v4d/third/imgui/backends/"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../Plan-V4D/modules/v4d/third/nanovg/src/"
   )
 
   ocv_create_module()

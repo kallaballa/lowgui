@@ -13,7 +13,8 @@ void Lowgui::namedWindow(const std::string& winname, int flags) {
 
 void Lowgui::imshow(const std::string& winname, InputArray mat) {
     if (mat.empty()) return;
-    cv::UMat umat = mat.getUMat(cv::ACCESS_READ);
+    cv::Mat cpu = mat.getMat();
+    cv::UMat umat = cpu.getUMat(cv::ACCESS_READ);
     WindowManager::instance().pushImage(winname, umat);
 }
 
