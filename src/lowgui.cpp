@@ -2,6 +2,19 @@
 #include <opencv2/lowgui/window_manager.hpp>
 #include <opencv2/lowgui/lowgui_root_plan.hpp>
 #include <opencv2/v4d/v4d.hpp>
+#include <thread>
+#include <chrono>
+
+namespace cv {
+namespace lowgui {
+namespace detail {
+
+cv::UMat LowguiRootPlan::s_framebuffer;
+std::mutex LowguiRootPlan::s_fbMutex;
+
+}
+}
+}
 
 using namespace cv::lowgui;
 using namespace cv::lowgui::detail;
@@ -22,12 +35,25 @@ int Lowgui::waitKey(int delay) {
     if (!WindowManager::instance().isRunning()) {
         WindowManager::instance().setRunning(true);
 
-        cv::Rect viewport(0, 0, 960, 960);
-        cv::Ptr<V4D> runtime = V4D::init(viewport, "lowgui",
-                                         AllocateFlags::NANOVG | AllocateFlags::IMGUI,
-                                         ConfigFlags::DISPLAY_MODE);
-
-        V4DPlan::run<LowguiRootPlan>(0);
+        const char* headless = std::getenv("LOWGUI_HEADLESS_RENDER");
+        if (headless) {
+            std::thread worker([]() {
+                cv::Rect viewport(0, 0, 960, 960);
+                cv::Ptr<V4D> runtime = V4D::init(viewport, "lowgui",
+                                                 AllocateFlags::NANOVG | AllocateFlags::IMGUI,
+                                                 ConfigFlags::DISPLAY_MODE);
+                V4DPlan::run<LowguiRootPlan>(0);
+            });
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            cv::v4d::request_finish();
+            worker.join();
+        } else {
+            cv::Rect viewport(0, 0, 960, 960);
+            cv::Ptr<V4D> runtime = V4D::init(viewport, "lowgui",
+                                             AllocateFlags::NANOVG | AllocateFlags::IMGUI,
+                                             ConfigFlags::DISPLAY_MODE);
+            V4DPlan::run<LowguiRootPlan>(0);
+        }
         WindowManager::instance().setRunning(false);
     }
     return -1;
@@ -74,4 +100,8 @@ void Lowgui::setWindowTitle(const std::string& winname, const std::string& title
     if (wd) {
         wd->title = title;
     }
+}
+
+cv::UMat Lowgui::readFramebuffer() {
+    return detail::LowguiRootPlan::getFramebuffer();
 }

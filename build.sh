@@ -3,11 +3,11 @@ set -euo pipefail
 
 HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIR="$HOME/../Plan-V4D/"
-OPENCV_DIR="$(dirname "$DIR")/opencv"
+OPENCV_DIR="$HOME/opencv"
 BUILD_DIR="$OPENCV_DIR/build"
 BUILD_MARKER="$BUILD_DIR/.build-type"
 JOBS=4
-TARGET=plan
+TARGET=plan+v4d+lowgui
 BUILD_TYPE=debug
 REBUILD=
 TEST_ARGS=
@@ -16,10 +16,10 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [options] [-- <test args>]
 
-Build the OpenCV plan / plan+v4d stack.
+Build the OpenCV plan / plan+v4d+lowgui stack.
 
 Options:
-  -t, --target TARGET    What to build: 'plan' or 'plan+v4d' (default: plan)
+  -t, --target TARGET    What to build: 'plan' or 'plan+v4d+lowgui' (default: plan)
   -b, --build-type TYPE  Build configuration: release, debug, asan, ubsan, tsan
                          (default: debug)
   -j, --jobs N           Parallel build jobs (default: 4)
@@ -32,7 +32,7 @@ when target is 'plan', which builds and runs the plan tests).
 
 Examples:
   $(basename "$0")
-  $(basename "$0") -t plan+v4d
+  $(basename "$0") -t plan+v4d+lowgui
   $(basename "$0") -t plan -b asan -j 8 -- --gtest_filter=Plan.*
 EOF
   exit 0
@@ -62,8 +62,8 @@ done
 TEST_ARGS="$*"
 
 case "$TARGET" in
-  plan|plan+v4d) ;;
-  *) echo "Invalid target '$TARGET' (expected 'plan' or 'plan+v4d')" >&2; exit 1 ;;
+  plan|plan+v4d+lowgui) ;;
+  *) echo "Invalid target '$TARGET' (expected 'plan' or 'plan+v4d+lowgui')" >&2; exit 1 ;;
 esac
 
 CMAKE_BUILD_TYPE=Debug
@@ -109,6 +109,8 @@ if [ "$REBUILD" = 1 ] || [ ! -d "$BUILD_DIR" ]; then
 fi
 
 CMAKE_ARGS=(
+  -DOPENCV_BUILD_TEST_MODULES_LIST=lowgui
+  -DOPENCV_BUILD_PERF_TEST_MODULES_LIST=lowgui
   -DCMAKE_POLICY_VERSION_MINIMUM=3.24
   -DWITH_WAYLAND=ON
   -DOPENCV_V4D_ENABLE_ES3=OFF
@@ -116,23 +118,10 @@ CMAKE_ARGS=(
   -DOPENCV_ALGO_HINT_DEFAULT=ALGO_HINT_APPROX
   -DCMAKE_MODULE_LINKER_FLAGS="/usr/local/lib64/"
   -DINSTALL_BIN_EXAMPLES=OFF
-  -DOPENCV_CUSTOM_PACKAGE_INFO=ON
-  -DCPACK_PACKAGE_VERSION_MAJOR=4
-  -DCPACK_PACKAGE_VERSION_MINOR=13
-  -DCPACK_PACKAGE_VERSION_PATCH=0
-  -DCPACK_PACKAGE_VERSION=4:13.0-beta-kallaballa
-  -DCPACK_PACKAGE_CONTACT="you@example.com"
-  -DOPENCV_GENERATE_PKGCONFIG=ON
-  -DCPACK_PACKAGE_VENDOR=yourname
-  -DCPACK_DEBIAN_PACKAGE_DEPENDS="libqt5opengl5,freeglut3,ocl-icd-libopencl1,libavcodec58,libavdevice58,libavfilter7,libavformat58,libavutil56,libpostproc55,libswresample3,libswscale5,libglfw3,libstb0,libglew2.2,zlib1g,libxinerama1,libxcursor1,libxi6,libva2,intel-opencl-icd,ca-certificates"
-  -DINSTALL_CREATE_DISTRIB=ON
-  -DCPACK_BINARY_DEB=ON
   -DCV_TRACE=OFF
   -DBUILD_SHARED_LIBS=ON
   -DWITH_OPENGL=ON
-  -DOPENCV_ENABLE_EGL=ON
   -DOPENCV_ENABLE_EGL_INTEROP=ON
-  -DOPENCV_ENABLE_GLX=ON
   -DOPENCV_ENABLE_GLX_INTEROP=ON
   -DOPENCV_FFMPEG_ENABLE_LIBAVDEVICE=ON
   -DBUILD_HARFBUZZ=ON
@@ -144,6 +133,7 @@ CMAKE_ARGS=(
   -DWITH_ADE=OFF
   -DWITH_VTK=OFF
   -DWITH_EIGEN=OFF
+  -DWITH_QT=OFF
   -DWITH_GTK=OFF
   -DWITH_GTK_2_X=OFF
   -DWITH_IPP=OFF
@@ -240,7 +230,7 @@ CMAKE_ARGS=(
   -DBUILD_opencv_world=OFF
   -DBUILD_opencv_lowgui=ON
   -DBUILD_EXAMPLES=ON
-  -DBUILD_PACKAGE=ON
+  -DBUILD_PACKAGE=OFF
   -DBUILD_DOCS=OFF
   -DWITH_PTHREADS_PF=ON
   -DCV_ENABLE_INTRINSICS=ON
@@ -252,28 +242,17 @@ CMAKE_ARGS=(
   -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE"
 )
 
-if [ "$TARGET" = plan+v4d ]; then
+if [ "$TARGET" = plan+v4d+lowgui ]; then
   CMAKE_ARGS+=(
     -DWITH_QT=OFF
-    -DBUILD_TESTS=OFF
+    -DBUILD_TESTS=ON
     -DBUILD_PERF_TESTS=OFF
     -DBUILD_opencv_highgui=OFF
     -DBUILD_opencv_geometry=ON
     -DBUILD_opencv_stereo=ON
     -DBUILD_opencv_xobjdetect=ON
     -DBUILD_opencv_v4d=ON
-  )
-else
-  CMAKE_ARGS+=(
-    -DWITH_QT=ON
-    -DOPENCV_BUILD_TEST_MODULES_LIST=plan
-    -DOPENCV_BUILD_PERF_TEST_MODULES_LIST=plan
-    -DBUILD_TESTS=ON
-    -DBUILD_PERF_TESTS=ON
-    -DBUILD_opencv_highgui=ON
-    -DBUILD_opencv_stereo=OFF
-    -DBUILD_opencv_xobjdetect=OFF
-    -DBUILD_opencv_v4d=OFF
+    -DBUILD_opencv_ts=ON
   )
 fi
 
@@ -299,9 +278,8 @@ fi
 
 echo "$BUILD_TYPE" > "$BUILD_MARKER"
 
-if [ "$TARGET" = plan+v4d ]; then
+if [ "$TARGET" = plan+v4d+lowgui ]; then
   make -j"$JOBS"
-else
   make -j"$JOBS" opencv_test_plan opencv_perf_plan
   if [ -x ./bin/opencv_test_plan ]; then
     ./bin/opencv_test_plan $TEST_ARGS

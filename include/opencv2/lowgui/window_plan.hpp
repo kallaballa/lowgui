@@ -13,7 +13,7 @@ using namespace cv::v4d;
 class WindowPlan : public V4DPlan {
     std::string window_name_;
     cv::UMat rgba_;
-    Property<cv::Size> size_ = P<cv::Size>(V4D::Keys::SIZE);
+    Property<cv::Rect> vp_ = P<cv::Rect>(V4D::Keys::VIEWPORT);
 
 public:
     explicit WindowPlan(const std::string& name) : window_name_(name) {}
@@ -46,19 +46,19 @@ public:
             }
         }, RW(rgba_));
 
-        nvg([this](const UMat& rgba, const cv::Size& sz) {
+        nvg([this](const UMat& rgba, const cv::Rect& vp) {
             using namespace cv::v4d::nvg;
             if (rgba.empty()) return;
 
             save();
             float sc = std::min(
-                (float)sz.width / rgba.cols,
-                (float)sz.height / rgba.rows
+                (float)vp.width / rgba.cols,
+                (float)vp.height / rgba.rows
             );
-            int drawW = rgba.cols * sc;
-            int drawH = rgba.rows * sc;
-            int x = (sz.width - drawW) / 2;
-            int y = (sz.height - drawH) / 2;
+            float drawW = rgba.cols * sc;
+            float drawH = rgba.rows * sc;
+            float x = vp.x + (vp.width - drawW) / 2.0f;
+            float y = vp.y + (vp.height - drawH) / 2.0f;
 
             translate(x, y);
             scale(sc, sc);
@@ -73,7 +73,7 @@ public:
                 deleteImage(handle);
             }
             restore();
-        }, R(rgba_), size_);
+        }, R(rgba_), vp_);
     }
 
     void teardown() override {}

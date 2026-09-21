@@ -2,6 +2,7 @@
 #define OPENCV_LOWGUI_LOWGUI_ROOT_PLAN_HPP_
 
 #include <cmath>
+#include <mutex>
 #include <opencv2/v4d/v4d.hpp>
 #include <opencv2/lowgui/window_manager.hpp>
 #include <opencv2/lowgui/window_plan.hpp>
@@ -18,8 +19,29 @@ class LowguiRootPlan : public V4DPlan {
     std::vector<cv::Rect> viewports_;
     Property<cv::Size> size_ = P<cv::Size>(V4D::Keys::SIZE);
 
+    static cv::UMat s_framebuffer;
+    static std::mutex s_fbMutex;
+
 public:
     LowguiRootPlan() = default;
+
+    void captureFramebuffer() {
+        cv::Ptr<PlanRuntime> pr = runtime();
+        V4D* v4d = dynamic_cast<V4D*>(pr.get());
+        if (v4d) {
+            cv::Ptr<PlanContext> fb_ctx = v4d->fbCtx();
+            FrameBufferContext* fb = dynamic_cast<FrameBufferContext*>(fb_ctx.get());
+            if (fb) {
+                std::lock_guard<std::mutex> lock(s_fbMutex);
+                fb->copyTo(s_framebuffer);
+            }
+        }
+    }
+
+    static cv::UMat getFramebuffer() {
+        std::lock_guard<std::mutex> lock(s_fbMutex);
+        return s_framebuffer.clone();
+    }
 
     void setup() override {
         set(GlobalState::Keys::TIME_TRACKER, V(false));
@@ -82,6 +104,9 @@ public:
     }
 
     void teardown() override {
+        if (std::getenv("LOWGUI_HEADLESS_RENDER")) {
+            captureFramebuffer();
+        }
         for (auto& plan : window_plans_) {
             this->subTeardown(plan);
         }

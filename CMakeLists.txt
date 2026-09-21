@@ -21,6 +21,13 @@ if(NOT (TARGET ${the_module}))
 
   target_compile_features(${the_module} PRIVATE cxx_std_20)
 
+  if(BUILD_TESTS AND NOT BUILD_opencv_world)
+    ocv_add_accuracy_tests(opencv_test_lowgui)
+    if(TARGET opencv_test_lowgui)
+      target_compile_features(opencv_test_lowgui PRIVATE cxx_std_20)
+    endif()
+  endif()
+
   if(NOT APPLE)
     ocv_target_link_libraries(${the_module} OpenGL GLU)
   endif()

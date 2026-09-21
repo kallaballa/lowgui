@@ -95,6 +95,13 @@ public:
      * @return The full key code, or -1 if no key was pressed.
      */
     static int waitKeyEx(int delay = 0);
+
+    /**
+     * @brief Reads the framebuffer from the last headless render.
+     * Only valid when LOWGUI_HEADLESS_RENDER is set and waitKey has returned.
+     * @return The framebuffer image, or empty UMat if not available.
+     */
+    static cv::UMat readFramebuffer();
 };
 
 } // namespace lowgui

@@ -9,13 +9,12 @@ It maps window names to Plan-instances and feeds them images through a `SinkSour
 
 ## Features
 
-- `cv::lowgui::namedWindow` — create a named viewer window
-- `cv::lowgui::imshow` — push an image to a named window
-- `cv::lowgui::waitKey` — enter the event loop / render frame
-- `cv::lowgui::destroyWindow` / `destroyAllWindows` — cleanup
-- NanoVG-based rendering with zoom/pan via the V4D image-viewer demo
+- `cv::lowgui::Lowgui::namedWindow` — create a named viewer window
+- `cv::lowgui::Lowgui::imshow` — push an image to a named window
+- `cv::lowgui::Lowgui::waitKey` — enter the event loop / render frame
+- `cv::lowgui::Lowgui::destroyWindow` / `destroyAllWindows` — cleanup
+- NanoVG-based rendering with fit-to-viewport scaling
 - Support for multiple windows arranged in a grid layout
-- Window flags: WINDOW_NORMAL, WINDOW_AUTOSIZE, WINDOW_OPENGL
 
 ## Architecture
 
@@ -34,10 +33,49 @@ The implementation consists of:
 ## Building
 
 ```bash
-./build.sh
+./build.sh -t plan+v4d -b debug
 ```
 
-The build script configures CMake with the appropriate flags and builds the lowgui module along with the sample demo.
+## Testing
+
+### Local tests (non-rendering)
+
+```bash
+./build.sh -t plan+v4d -b debug
+./bin/opencv_test_lowgui --gtest_filter=-*Rendering*
+```
+
+### Local tests (rendering)
+
+Rendering tests require a display server. Use Xvfb for headless runs:
+
+```bash
+xvfb-run -a ./bin/opencv_test_lowgui --gtest_filter=*Rendering*
+```
+
+### Full system tests (QEMU)
+
+All tests, including rendering, run inside a QEMU VM for full isolation. The VM uses a Debian 12 rootfs with Mesa llvmpipe for software OpenGL.
+
+```bash
+# 1. Build the VM image (requires sudo)
+sudo ./scripts/build-vm-image.sh
+
+# 2. Run tests inside QEMU
+./scripts/vm-boot-and-test.sh \
+  --image lowgui-test.img \
+  --kernel vmlinuz \
+  --initrd initrd.img \
+  --repo-path /home/elchaschab/devel \
+  --ssh-key vm-key \
+  --out-dir /tmp/qemu-out
+```
+
+The `run-tests-in-vm.sh` script inside the VM mounts the source tree via virtio-9p, builds with `build.sh -t plan+v4d`, and executes `opencv_test_lowgui`. JUnit XML results are copied to the output mount.
+
+## CI
+
+GitHub Actions runs the QEMU workflow on push/PR to `main`/`master`. The VM image is cached and rebuilt only when provisioning scripts change.
 
 ## Sample
 
@@ -45,18 +83,16 @@ The build script configures CMake with the appropriate flags and builds the lowg
 #include <opencv2/lowgui/lowgui.hpp>
 #include <opencv2/imgcodecs.hpp>
 
-using namespace cv;
-using namespace cv::lowgui;
-
 int main(int argc, char** argv) {
-    Mat img = imread(argc > 1 ? argv[1] : "lena.png");
+    std::string imgFile = argc > 1 ? argv[1] : cv::samples::findFile("lena.png");
+    cv::Mat img = cv::imread(imgFile);
     if (img.empty()) return 1;
 
-    Lowgui::namedWindow("demo");
-    Lowgui::imshow("demo", img);
-    Lowgui::waitKey(0);
+    cv::lowgui::Lowgui::namedWindow("demo");
+    cv::lowgui::Lowgui::imshow("demo", img);
+    cv::lowgui::Lowgui::waitKey(0);
 
-    Lowgui::destroyAllWindows();
+    cv::lowgui::Lowgui::destroyAllWindows();
     return 0;
 }
 ```
