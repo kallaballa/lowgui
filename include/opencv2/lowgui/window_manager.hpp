@@ -103,7 +103,7 @@ struct WindowData {
     void* mouseUserdata = nullptr;
     std::map<std::string, Trackbar> trackbars;
     int propAutosize = 0;      // 0 / WINDOW_AUTOSIZE
-    int propKeepRatio = 0;     // WINDOW_FREERATIO / WINDOW_KEEPRATIO
+    bool propKeepRatio = true; // true = WINDOW_KEEPRATIO (letterbox), false = WINDOW_FREERATIO
     int propFullscreen = 0;    // WINDOW_NORMAL / WINDOW_FULLSCREEN
     int propVisible = 1;       // 1 / 0
     TransientMsg statusMsg;
@@ -121,7 +121,7 @@ struct WindowData {
         : name(std::move(n)), title(std::move(t)), flags(f),
           sink(std::make_shared<SinkSource>()), viewport() {
         propAutosize = (f & WINDOW_AUTOSIZE) ? WINDOW_AUTOSIZE : 0;
-        propKeepRatio = WINDOW_KEEPRATIO;
+        propKeepRatio = true;
         propVisible = 1;
         propFullscreen = WINDOW_NORMAL;
     }

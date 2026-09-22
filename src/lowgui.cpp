@@ -88,9 +88,15 @@ void engineFn(bool offscreen) {
     } catch (...) {
         CV_LOG_ERROR(nullptr, "lowgui render engine terminated with unknown error.");
     }
-    // Wake any thread blocked in waitKey(0) so it returns -1 at shutdown.
-    cv::lowgui::detail::keyQueue().notify();
+    // Engine is dead: mark it before waking waiters so any thread that races in
+    // between sees the post-death -1 path instead of re-entering the waits.
     gEngineLoopAlive = false;
+    // Wake every thread blocked in waitKey so it returns -1 at shutdown: the
+    // key queue (below) plus any parked on the framebuffer-capture or
+    // settled-frame condition variables (otherwise waitKey(0) stalls for the
+    // full 10 s capture timeout after the native window closes).
+    cv::lowgui::detail::keyQueue().notify();
+    LowguiRootPlan::notifyWaitersShutdown();
 }
 
 void startEngine(bool offscreen) {

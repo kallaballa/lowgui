@@ -111,6 +111,11 @@ if [ -n "${SAN:-}" ]; then
   SHARED_LINKER_FLAGS="$SAN"
 fi
 
+if [ ! -d "$DIR/modules" ]; then
+  echo "==> Initializing Plan-V4D submodule (needed for v4d/plan module sources) ..."
+  git submodule update --init --recursive
+fi
+
 if [ ! -d "$OPENCV_DIR" ]; then
   # Prefer SSH (fast for repo owners), fall back to HTTPS so developers and CI
   # without GitHub SSH keys can bootstrap the build.
@@ -138,7 +143,7 @@ CMAKE_ARGS=(
   -DOPENCV_V4D_ENABLE_ES3=OFF
   -DOPENCV_V4D_ENABLE_BGFX=OFF
   -DOPENCV_ALGO_HINT_DEFAULT=ALGO_HINT_APPROX
-  -DCMAKE_MODULE_LINKER_FLAGS="/usr/local/lib64/"
+  -DCMAKE_MODULE_LINKER_FLAGS="-L/usr/local/lib64"
   -DINSTALL_BIN_EXAMPLES=OFF
   -DBUILD_EXAMPLES=ON
   -DBUILD_PACKAGE=OFF

@@ -11,11 +11,17 @@ if(NOT (TARGET ${the_module}))
   # v4d's public headers transitively include third-party imgui/nanovg headers,
   # so every compilation unit that touches lowgui's internal headers must have
   # these on the include path (module sources and the test binaries).
+  # The Plan-V4D *submodule* lives inside this repo at ./Plan-V4D — never point
+  # at a sibling ../Plan-V4D, which breaks in a fresh CI checkout.
   set(LOWGUI_GPU_INCLUDE_DIRS
-    "${CMAKE_CURRENT_SOURCE_DIR}/../Plan-V4D/modules/v4d/third/imgui"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../Plan-V4D/modules/v4d/third/imgui/backends/"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../Plan-V4D/modules/v4d/third/nanovg/src/"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Plan-V4D/modules/v4d/third/imgui"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Plan-V4D/modules/v4d/third/imgui/backends/"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Plan-V4D/modules/v4d/third/nanovg/src/"
   )
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Plan-V4D/modules/v4d/third/imgui/imgui.h")
+    message(FATAL_ERROR "lowgui: the Plan-V4D submodule is not checked out. "
+      "Run 'git submodule update --init' before configuring (see build.sh).")
+  endif()
 
   ocv_module_include_directories(
     "${CMAKE_CURRENT_LIST_DIR}/include"

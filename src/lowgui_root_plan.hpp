@@ -15,6 +15,7 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -192,6 +193,11 @@ public:
     // Wakes settled-frame waiters (used by setWindowProperty(FULLSCREEN) so a
     // subsequent waitKey(0) presents the updated layout/fullscreen state).
     static void notifySettledFrame(std::uint64_t gen);
+
+    // Engine-termination hook: releases waitKey(0) threads parked on the
+    // capture/settle condition variables so they return -1 promptly (via the
+    // post-death path) instead of stalling until the 10 s timeout elapses.
+    static void notifyWaitersShutdown();
 
     static cv::UMat getFramebuffer() {
         std::lock_guard<std::mutex> lock(s_fbMutex);
@@ -772,7 +778,7 @@ private:
             {
                 std::lock_guard<std::mutex> lock(wd->sink->mtx);
                 title = wd->title;
-                st.keepRatio = (wd->propKeepRatio != 0);
+                st.keepRatio = wd->propKeepRatio;
                 st.statusText = wd->statusMsg.active() ? wd->statusMsg.text : std::string();
                 st.overlayText = wd->overlayMsg.active() ? wd->overlayMsg.text : std::string();
                 winFullscreen = wd->propFullscreen != 0;
@@ -1849,6 +1855,19 @@ void LowguiRootPlan::notifySettledFrame(std::uint64_t gen) {
     s_frameDrawDoneGen.store(gen);
     std::lock_guard<std::mutex> lock(s_frameDrawMtx);
     s_frameDrawCv.notify_all();
+}
+
+void LowguiRootPlan::notifyWaitersShutdown() {
+    {
+        std::lock_guard<std::mutex> lock(s_captureMtx);
+        s_captureDone = s_captureRequested;
+        s_captureCv.notify_all();
+    }
+    {
+        std::lock_guard<std::mutex> lock(s_frameDrawMtx);
+        s_frameDrawDoneGen.store(std::numeric_limits<std::uint64_t>::max());
+        s_frameDrawCv.notify_all();
+    }
 }
 
 } // namespace detail

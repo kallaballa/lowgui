@@ -18,6 +18,14 @@ echo "==> Building VM image: $IMG"
 # If image and key already exist, skip build (cached)
 if [ -f "$IMG" ] && [ -f vmlinuz ] && [ -f initrd.img ] && [ -f vm-key ]; then
   echo "==> VM image already exists, skipping build"
+  # Enforce the on-disk private-key permissions even on the cached path: the
+  # credentials are a root login for the test VM and must never stay
+  # world-readable (chmod of root-owned files requires sudo/priviledges).
+  if [ -n "${SUDO_USER:-}" ]; then
+    chown "$SUDO_USER" ./vm-key "$IMG" 2>/dev/null || true
+  fi
+  chmod 600 ./vm-key
+  chmod 600 "$IMG"
   exit 0
 fi
 

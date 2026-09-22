@@ -420,7 +420,10 @@ void WindowManager::setProperty(const std::string& name, int prop, int value) {
             wd->propAutosize = (value == WINDOW_AUTOSIZE) ? WINDOW_AUTOSIZE : 0;
             break;
         case WND_PROP_ASPECT_RATIO:
-            wd->propKeepRatio = (value == WINDOW_KEEPRATIO) ? WINDOW_KEEPRATIO : 0;
+            // WINDOW_KEEPRATIO is 0x00000000 (same value as WINDOW_NORMAL), so it
+            // cannot be stored directly as a value; store a bool and treat any
+            // non-FREERATIO setting as "keep ratio".
+            wd->propKeepRatio = (value != WINDOW_FREERATIO);
             break;
         case WND_PROP_FULLSCREEN:
             wd->propFullscreen = (value == WINDOW_FULLSCREEN) ? WINDOW_FULLSCREEN : 0;

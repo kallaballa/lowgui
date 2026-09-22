@@ -98,6 +98,27 @@ TEST_F(LowguiApiTest, setWindowTitle_updates_title) {
     Lowgui::destroyAllWindows();
 }
 
+TEST_F(LowguiApiTest, aspect_ratio_property_roundtrip) {
+    // Regression guard: WINDOW_KEEPRATIO is 0x00000000 (same value as
+    // WINDOW_NORMAL), so it must roundtrip through the store instead of being
+    // indistinguishable from "unset" (which silently flipped every window to
+    // WINDOW_FREERATIO / anisotropic stretch). Default is KEEPRATIO.
+    Lowgui::namedWindow("ratio_win");
+    EXPECT_EQ(Lowgui::getWindowProperty("ratio_win", cv::lowgui::WND_PROP_ASPECT_RATIO),
+              cv::lowgui::WINDOW_KEEPRATIO);
+
+    Lowgui::setWindowProperty("ratio_win", cv::lowgui::WND_PROP_ASPECT_RATIO,
+                              cv::lowgui::WINDOW_FREERATIO);
+    EXPECT_EQ(Lowgui::getWindowProperty("ratio_win", cv::lowgui::WND_PROP_ASPECT_RATIO),
+              cv::lowgui::WINDOW_FREERATIO);
+
+    Lowgui::setWindowProperty("ratio_win", cv::lowgui::WND_PROP_ASPECT_RATIO,
+                              cv::lowgui::WINDOW_KEEPRATIO);
+    EXPECT_EQ(Lowgui::getWindowProperty("ratio_win", cv::lowgui::WND_PROP_ASPECT_RATIO),
+              cv::lowgui::WINDOW_KEEPRATIO);
+    Lowgui::destroyAllWindows();
+}
+
 TEST_F(LowguiApiTest, setWindowTitle_nonexistent_is_safe) {
     EXPECT_NO_THROW(Lowgui::setWindowTitle("nonexistent", "title"));
 }
