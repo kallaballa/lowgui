@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-vm-image:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       image-path: ${{ steps.build.outputs.image-path }}
       kernel-path: ${{ steps.build.outputs.kernel-path }}
@@ -35,7 +35,7 @@ jobs:
           key: vm-image-${{ hashFiles('scripts/build-vm-image.sh', 'scripts/provision-chroot.sh') }}
 
   xvfb-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04 
     needs: build-vm-image
     steps:
       - uses: actions/checkout@v4
@@ -62,7 +62,7 @@ jobs:
 
   qemu-tests:
     needs: build-vm-image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - name: Restore cached VM image
