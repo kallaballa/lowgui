@@ -19,10 +19,13 @@ namespace detail {
 class CV_EXPORTS SinkSource {
     cv::UMat frame_;
     bool has_frame_ = false;
-    mutable std::mutex mtx_;
     float fps_ = 30.0f;
 
 public:
+    // Public so per-window state (viewport/title) can be guarded with the same
+    // lock that protects the frame (see WindowData).
+    mutable std::mutex mtx;
+
     /**
      * @brief Constructs a SinkSource with the given fps.
      * @param fps Frames per second (default: 30).
@@ -38,7 +41,8 @@ public:
      * @param img Image to push (will be converted to UMat).
      */
     void push(const cv::Mat& img) {
-        std::lock_guard<std::mutex> lock(mtx_);
+        if (img.empty()) return;
+        std::lock_guard<std::mutex> lock(mtx);
         img.copyTo(frame_);
         has_frame_ = true;
     }
@@ -48,7 +52,8 @@ public:
      * @param img Image to push.
      */
     void push(const cv::UMat& img) {
-        std::lock_guard<std::mutex> lock(mtx_);
+        if (img.empty()) return;
+        std::lock_guard<std::mutex> lock(mtx);
         img.copyTo(frame_);
         has_frame_ = true;
     }
@@ -57,7 +62,7 @@ public:
      * @brief Checks if there's an image available.
      */
     bool hasImage() const {
-        std::lock_guard<std::mutex> lock(mtx_);
+        std::lock_guard<std::mutex> lock(mtx);
         return has_frame_;
     }
 
@@ -65,6 +70,20 @@ public:
      * @brief Gets the fps.
      */
     float fps() const { return fps_; }
+
+    /**
+     * @brief Returns the latest pushed frame without consuming it.
+     *
+     * The render loop uses this to keep displaying the last known image; it is
+     * a clone so the caller can render it after releasing the lock.
+     *
+     * @return A copy of the latest frame, or an empty UMat if none was pushed.
+     */
+    cv::UMat frame() const {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (has_frame_) return frame_.clone();
+        return cv::UMat();
+    }
 
     /**
      * @brief Generates the next frame (called by V4D runtime).
@@ -75,7 +94,7 @@ public:
      * @return The next frame.
      */
     cv::UMat next() {
-        std::lock_guard<std::mutex> lock(mtx_);
+        std::lock_guard<std::mutex> lock(mtx);
         if (has_frame_) {
             has_frame_ = false;
             return frame_.clone();

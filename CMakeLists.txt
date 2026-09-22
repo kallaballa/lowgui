@@ -8,12 +8,19 @@ if(NOT (TARGET ${the_module}))
   file(GLOB lowgui_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
   ocv_glob_module_sources(${lowgui_sources})
 
-  ocv_module_include_directories(
-    "${CMAKE_CURRENT_LIST_DIR}/include"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  # v4d's public headers transitively include third-party imgui/nanovg headers,
+  # so every compilation unit that touches lowgui's internal headers must have
+  # these on the include path (module sources and the test binaries).
+  set(LOWGUI_GPU_INCLUDE_DIRS
     "${CMAKE_CURRENT_SOURCE_DIR}/../Plan-V4D/modules/v4d/third/imgui"
     "${CMAKE_CURRENT_SOURCE_DIR}/../Plan-V4D/modules/v4d/third/imgui/backends/"
     "${CMAKE_CURRENT_SOURCE_DIR}/../Plan-V4D/modules/v4d/third/nanovg/src/"
+  )
+
+  ocv_module_include_directories(
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    ${LOWGUI_GPU_INCLUDE_DIRS}
   )
 
   ocv_create_module()
@@ -22,10 +29,22 @@ if(NOT (TARGET ${the_module}))
   target_compile_features(${the_module} PRIVATE cxx_std_20)
 
   if(BUILD_TESTS AND NOT BUILD_opencv_world)
-    ocv_add_accuracy_tests(opencv_test_lowgui)
+    # An explicit source list both selects the accuracy tests and suppresses
+    # ocv_add_accuracy_tests' recursive GLOB (which would otherwise re-pull the
+    # test_offscreen sources into the main binary). OPENCV_TEST_<module>_SOURCES
+    # is the extension point for that; passing FILES ... would eat the first
+    # entry as a source-group label.
+    set(OPENCV_TEST_lowgui_SOURCES
+      test/test_main.cpp
+      test/test_lowgui_api.cpp
+      test/test_window_manager.cpp
+    )
+    ocv_add_accuracy_tests()
     if(TARGET opencv_test_lowgui)
       target_compile_features(opencv_test_lowgui PRIVATE cxx_std_20)
+      ocv_target_include_directories(opencv_test_lowgui PRIVATE ${LOWGUI_GPU_INCLUDE_DIRS})
     endif()
+    add_subdirectory(test_offscreen)
   endif()
 
   if(NOT APPLE)

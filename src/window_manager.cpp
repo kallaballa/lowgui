@@ -14,10 +14,7 @@ void WindowManager::createWindow(const std::string& name, int flags) {
     std::lock_guard<std::mutex> lock(mtx_);
     auto it = windows_.find(name);
     if (it == windows_.end()) {
-        // Use emplace to construct in-place, avoiding copy/move operations
-        windows_.emplace(std::piecewise_construct,
-                         std::forward_as_tuple(name),
-                         std::forward_as_tuple(name, name, flags));
+        windows_.emplace(name, std::make_shared<WindowData>(name, name, flags));
     }
 }
 
@@ -33,41 +30,39 @@ void WindowManager::destroyAllWindows() {
     cv_.notify_all();
 }
 
+bool WindowManager::hasWindow(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mtx_);
+    return windows_.find(name) != windows_.end();
+}
+
 void WindowManager::pushImage(const std::string& name, const cv::UMat& img) {
     std::unique_lock<std::mutex> lock(mtx_);
     auto it = windows_.find(name);
     if (it == windows_.end()) return;
-    std::unique_lock<std::mutex> bufferLock(it->second.buffer.mtx);
-    img.copyTo(it->second.buffer.image);
-    it->second.buffer.has_image = true;
+    it->second->sink.push(img);
 }
 
 bool WindowManager::popImage(const std::string& name, cv::UMat& img) {
     std::unique_lock<std::mutex> lock(mtx_);
     auto it = windows_.find(name);
     if (it == windows_.end()) return false;
-    std::unique_lock<std::mutex> bufferLock(it->second.buffer.mtx);
-    if (!it->second.buffer.has_image) return false;
-    it->second.buffer.image.copyTo(img);
-    it->second.buffer.has_image = false;
-    return true;
+    img = it->second->sink.next();
+    return !img.empty();
 }
 
 bool WindowManager::getImage(const std::string& name, cv::UMat& img) const {
     std::unique_lock<std::mutex> lock(mtx_);
     auto it = windows_.find(name);
     if (it == windows_.end()) return false;
-    std::unique_lock<std::mutex> bufferLock(it->second.buffer.mtx);
-    if (!it->second.buffer.has_image) return false;
-    it->second.buffer.image.copyTo(img);
-    return true;
+    img = it->second->sink.frame();
+    return !img.empty();
 }
 
 WindowData* WindowManager::getWindow(const std::string& name) {
     std::lock_guard<std::mutex> lock(mtx_);
     auto it = windows_.find(name);
     if (it != windows_.end()) {
-        return &it->second;
+        return it->second.get();
     }
     return nullptr;
 }
@@ -76,7 +71,25 @@ const WindowData* WindowManager::getWindow(const std::string& name) const {
     std::lock_guard<std::mutex> lock(mtx_);
     auto it = windows_.find(name);
     if (it != windows_.end()) {
-        return &it->second;
+        return it->second.get();
+    }
+    return nullptr;
+}
+
+std::shared_ptr<WindowData> WindowManager::getWindowShared(const std::string& name) {
+    std::lock_guard<std::mutex> lock(mtx_);
+    auto it = windows_.find(name);
+    if (it != windows_.end()) {
+        return it->second;
+    }
+    return nullptr;
+}
+
+std::shared_ptr<const WindowData> WindowManager::getWindowShared(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mtx_);
+    auto it = windows_.find(name);
+    if (it != windows_.end()) {
+        return it->second;
     }
     return nullptr;
 }

@@ -20,20 +20,18 @@ It maps window names to Plan-instances and feeds them images through a `SinkSour
 
 The implementation consists of:
 
-1. **WindowManager** (`window_manager.hpp/cpp`) — singleton that manages window data (name, flags, image buffer, viewport). Thread-safe with mutex and condition variable.
+1. **WindowManager** (`window_manager.hpp/cpp`) — singleton that manages window data (name, flags, image buffer, viewport). Thread-safe with mutex and condition variable. Windows are owned via `shared_ptr` so concurrent accessors never dangle.
 
-2. **WindowPlan** (`window_plan.hpp`) — V4DPlan that renders a single window's image. Converts images to RGBA and draws them using NanoVG with fit-to-viewport scaling.
+2. **LowguiRootPlan** (`lowgui_root_plan.hpp`) — the root Plan-V4D plan behind the long-lived render engine. Each frame it re-reads the current window set from the WindowManager, arranges the windows in a grid, and draws each one through NanoVG with fit-to-viewport scaling (handling 8U as well as 16S/16U/32S/32F/64F depth conversions like highgui's `imshow`). It also owns the offscreen framebuffer snapshot mechanism used by `readFramebuffer()`.
 
-3. **LowguiRootPlan** (`lowgui_root_plan.hpp`) — root V4DPlan that arranges all windows in a grid layout and renders each one.
+3. **SinkSource** (`sink_source.hpp`) — a Source-like buffer that can be pushed images to from external threads. The primary image path is the WindowManager's per-window image buffers; `SinkSource` is provided as an extension point.
 
-4. **SinkSource** (`sink_source.hpp`) — a Source-like buffer that can be pushed images to from external threads.
-
-5. **Lowgui API** (`lowgui.hpp/cpp`) — public API mimicking OpenCV's highgui functions.
+4. **Lowgui API** (`lowgui.hpp/cpp`) — public API mimicking OpenCV's highgui functions. `waitKey` starts (once per process) a long-lived render/event-loop engine and coordinates framebuffer snapshots and key waits against it.
 
 ## Building
 
 ```bash
-./build.sh -t plan+v4d -b debug
+./build.sh -t plan+v4d+lowgui -b debug
 ```
 
 ## Testing
@@ -41,11 +39,25 @@ The implementation consists of:
 ### Local tests (non-rendering)
 
 ```bash
-./build.sh -t plan+v4d -b debug
+./build.sh -t plan+v4d+lowgui -b debug
 ./bin/opencv_test_lowgui --gtest_filter=-*Rendering*
 ```
 
-### Local tests (rendering)
+### Local tests (offscreen rendering)
+
+Requires no display server when Mesa llvmpipe is available:
+
+```bash
+LIBGL_ALWAYS_SOFTWARE=1 ./bin/opencv_test_lowgui_offscreen
+```
+
+Or under Xvfb:
+
+```bash
+xvfb-run -a ./bin/opencv_test_lowgui_offscreen
+```
+
+### Local tests (rendering, legacy)
 
 Rendering tests require a display server. Use Xvfb for headless runs:
 
@@ -71,11 +83,11 @@ sudo ./scripts/build-vm-image.sh
   --out-dir /tmp/qemu-out
 ```
 
-The `run-tests-in-vm.sh` script inside the VM mounts the source tree via virtio-9p, builds with `build.sh -t plan+v4d`, and executes `opencv_test_lowgui`. JUnit XML results are copied to the output mount.
+The `run-tests-in-vm.sh` script inside the VM mounts the source tree via virtio-9p, builds with `build.sh -t plan+v4d+lowgui`, and executes both `opencv_test_lowgui` and `opencv_test_lowgui_offscreen`. JUnit XML results are copied to the output mount.
 
 ## CI
 
-GitHub Actions runs the QEMU workflow on push/PR to `main`/`master`. The VM image is cached and rebuilt only when provisioning scripts change.
+GitHub Actions runs the QEMU workflow and an xvfb workflow on push/PR to `main`/`master`. The VM image is cached and rebuilt only when provisioning scripts change.
 
 ## Sample
 

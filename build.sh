@@ -19,7 +19,9 @@ Usage: $(basename "$0") [options] [-- <test args>]
 Build the OpenCV plan / plan+v4d+lowgui stack.
 
 Options:
-  -t, --target TARGET    What to build: 'plan' or 'plan+v4d+lowgui' (default: plan)
+  -t, --target TARGET    What to build: 'plan' or 'plan+v4d+lowgui'.
+                         'plan+v4d' is accepted as a shorthand for
+                         'plan+v4d+lowgui'. (default: plan+v4d+lowgui)
   -b, --build-type TYPE  Build configuration: release, debug, asan, ubsan, tsan
                          (default: debug)
   -j, --jobs N           Parallel build jobs (default: 4)
@@ -62,9 +64,24 @@ done
 TEST_ARGS="$*"
 
 case "$TARGET" in
-  plan|plan+v4d+lowgui) ;;
+  plan) ;;
+  plan+v4d+lowgui) ;;
+  plan+v4d)
+    # Shorthand for the full stack (documented in README and used by CI/VM).
+    TARGET=plan+v4d+lowgui ;;
   *) echo "Invalid target '$TARGET' (expected 'plan' or 'plan+v4d+lowgui')" >&2; exit 1 ;;
 esac
+
+# Which modules' test/perf binaries should cmake generate. This must match the
+# active target: 'plan' builds the plan module's tests, everything else builds
+# lowgui's (setting it unconditionally to lowgui made `make opencv_test_plan`
+# fail with "No rule to make target").
+TEST_MODULES=lowgui
+PERF_TEST_MODULES=lowgui
+if [ "$TARGET" = plan ]; then
+  TEST_MODULES=plan
+  PERF_TEST_MODULES=plan
+fi
 
 CMAKE_BUILD_TYPE=Debug
 C_FLAGS=
@@ -109,8 +126,8 @@ if [ "$REBUILD" = 1 ] || [ ! -d "$BUILD_DIR" ]; then
 fi
 
 CMAKE_ARGS=(
-  -DOPENCV_BUILD_TEST_MODULES_LIST=lowgui
-  -DOPENCV_BUILD_PERF_TEST_MODULES_LIST=lowgui
+  -DOPENCV_BUILD_TEST_MODULES_LIST="$TEST_MODULES"
+  -DOPENCV_BUILD_PERF_TEST_MODULES_LIST="$PERF_TEST_MODULES"
   -DCMAKE_POLICY_VERSION_MINIMUM=3.24
   -DWITH_WAYLAND=ON
   -DOPENCV_V4D_ENABLE_ES3=OFF
@@ -244,10 +261,12 @@ CMAKE_ARGS=(
 
 if [ "$TARGET" = plan+v4d+lowgui ]; then
   CMAKE_ARGS+=(
-    -DWITH_QT=OFF
+    -DWITH_GTK=ON
     -DBUILD_TESTS=ON
     -DBUILD_PERF_TESTS=OFF
-    -DBUILD_opencv_highgui=OFF
+    # opencv_ts links against highgui's test UI, so the full target builds the
+    # real highgui (GTK backend) as a dependency; code should use lowgui.
+    -DBUILD_opencv_highgui=ON
     -DBUILD_opencv_geometry=ON
     -DBUILD_opencv_stereo=ON
     -DBUILD_opencv_xobjdetect=ON
@@ -273,13 +292,27 @@ cd "$BUILD_DIR"
 if [ "$REBUILD" = 1 ]; then
   cmake --fresh "${CMAKE_ARGS[@]}" "$OPENCV_DIR"
 else
+  if [ "$TARGET" = plan+v4d+lowgui ] && [ -f CMakeCache.txt ]; then
+    # Purging stale internal module flags makes re-enabling modules that an
+    # earlier configure disabled (e.g. opencv_ts from a BUILD_TESTS=OFF run)
+    # actually take effect; INTERNAL cache vars are immune to -D overrides.
+    cmake -U'HAVE_opencv_ts' -U'BUILD_opencv_ts' \
+          -U'HAVE_opencv_v4d' -U'BUILD_opencv_v4d' \
+          -U'HAVE_opencv_plan' -U'BUILD_opencv_plan' \
+          -U'HAVE_opencv_lowgui' -U'BUILD_opencv_lowgui' \
+          -U'HAVE_opencv_highgui' -U'BUILD_opencv_highgui' \
+          -U'BUILD_TESTS' -U'BUILD_PERF_TESTS' -U'WITH_GTK' "$BUILD_DIR" || true
+  fi
   cmake "${CMAKE_ARGS[@]}" "$OPENCV_DIR"
 fi
 
 echo "$BUILD_TYPE" > "$BUILD_MARKER"
 
 if [ "$TARGET" = plan+v4d+lowgui ]; then
-  make -j"$JOBS"
+  # The default build target does not include the gtest binaries (they live
+  # under opencv_tests), so build them explicitly along with their deps.
+  make -j"$JOBS" opencv_test_lowgui opencv_test_lowgui_offscreen
+elif [ "$TARGET" = plan ]; then
   make -j"$JOBS" opencv_test_plan opencv_perf_plan
   if [ -x ./bin/opencv_test_plan ]; then
     ./bin/opencv_test_plan $TEST_ARGS
