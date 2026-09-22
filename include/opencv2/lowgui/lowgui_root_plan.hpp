@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
@@ -46,6 +47,14 @@ class LowguiRootPlan : public V4DPlan {
     static long s_captureRequested;
     static long s_captureDone;
 
+    // WindowManager generation observed at the start/end of drawWindows. A
+    // capture is only served by a frame that drew a fully-settled state: no
+    // mutation happened mid-draw (start==end) and the drawn state is at least
+    // as new as the requester's (end >= requested generation).
+    static std::atomic<std::uint64_t> s_frameDrawStartGen;
+    static std::atomic<std::uint64_t> s_frameDrawEndGen;
+    static std::uint64_t s_captureRequestedGen;
+
 public:
     LowguiRootPlan() = default;
 
@@ -59,9 +68,10 @@ public:
         s_framebuffer.release();
     }
 
-    static long requestFrameCapture() {
+    static long requestFrameCapture(std::uint64_t gen) {
         std::lock_guard<std::mutex> lock(s_captureMtx);
         ++s_captureRequested;
+        s_captureRequestedGen = gen;
         return s_captureRequested;
     }
 
@@ -105,6 +115,7 @@ private:
     void drawWindows(const cv::Size& sz) {
         using namespace cv::v4d::nvg;
 
+        std::uint64_t startGen = WindowManager::instance().generation();
         std::vector<std::string> names = WindowManager::instance().getWindowNames();
 
         // Reclaim handles for windows destroyed since the last frame.
@@ -118,7 +129,13 @@ private:
         }
 
         int n = (int)names.size();
-        if (n <= 0) return;
+        if (n <= 0) {
+            // No windows: record an empty, settled draw so any pending capture
+            // can be satisfied with an empty/cleared framebuffer.
+            s_frameDrawStartGen.store(startGen);
+            s_frameDrawEndGen.store(startGen);
+            return;
+        }
 
         int cols = std::ceil(std::sqrt((double)n));
         int rows = std::ceil((double)n / cols);
@@ -180,6 +197,9 @@ private:
             }
             restore();
         }
+
+        s_frameDrawEndGen.store(WindowManager::instance().generation());
+        s_frameDrawStartGen.store(startGen);
     }
 
     // Mirrors highgui's imshow depth handling: 8S +128, 16U>>8, 16S(+128)>>8,
@@ -217,11 +237,20 @@ private:
 
     void maybeCaptureFramebuffer() {
         long target = 0;
+        std::uint64_t requestedGen = 0;
         {
             std::lock_guard<std::mutex> lock(s_captureMtx);
             if (s_captureDone >= s_captureRequested) return;
             target = s_captureRequested;
+            requestedGen = s_captureRequestedGen;
         }
+
+        // Only capture a frame that drew a settled state: no window/image
+        // mutation happened during the draw and the drawn state is at least as
+        // new as the requester's setup. Otherwise skip this frame and let the
+        // caller keep waiting for the next one.
+        if (s_frameDrawStartGen.load() != s_frameDrawEndGen.load()) return;
+        if (s_frameDrawEndGen.load() < requestedGen) return;
 
         captureFramebuffer();
 

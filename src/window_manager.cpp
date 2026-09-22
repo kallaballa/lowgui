@@ -17,6 +17,7 @@ void WindowManager::createWindow(const std::string& name, int flags) {
     if (it == windows_.end()) {
         windows_.emplace(name, std::make_shared<WindowData>(name, name, flags));
         windowOrder_.push_back(name);
+        generation_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -24,6 +25,7 @@ void WindowManager::destroyWindow(const std::string& name) {
     std::lock_guard<std::mutex> lock(mtx_);
     windows_.erase(name);
     windowOrder_.erase(std::remove(windowOrder_.begin(), windowOrder_.end(), name), windowOrder_.end());
+    generation_.fetch_add(1, std::memory_order_relaxed);
     cv_.notify_all();
 }
 
@@ -31,6 +33,7 @@ void WindowManager::destroyAllWindows() {
     std::lock_guard<std::mutex> lock(mtx_);
     windows_.clear();
     windowOrder_.clear();
+    generation_.fetch_add(1, std::memory_order_relaxed);
     cv_.notify_all();
 }
 
@@ -44,6 +47,7 @@ void WindowManager::pushImage(const std::string& name, const cv::UMat& img) {
     auto it = windows_.find(name);
     if (it == windows_.end()) return;
     it->second->sink.push(img);
+    generation_.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool WindowManager::popImage(const std::string& name, cv::UMat& img) {

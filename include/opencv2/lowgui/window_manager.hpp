@@ -3,11 +3,13 @@
 
 #include <opencv2/core.hpp>
 #include <opencv2/lowgui/sink_source.hpp>
-#include <string>
-#include <unordered_map>
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
-#include <condition_variable>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace cv {
@@ -46,6 +48,10 @@ class WindowManager {
     mutable std::mutex mtx_;
     std::condition_variable cv_;
     bool running_ = false;
+    // Monotonically increased on every mutating operation (create/destroy/push).
+    // waitKey and the render loop use it to ensure a captured frame was drawn
+    // from state that is at least as new as what an API caller has set up.
+    std::atomic<std::uint64_t> generation_{0};
 
 public:
     static WindowManager& instance();
@@ -54,6 +60,8 @@ public:
     void destroyWindow(const std::string& name);
     void destroyAllWindows();
     bool hasWindow(const std::string& name) const;
+
+    std::uint64_t generation() const { return generation_.load(std::memory_order_relaxed); }
 
     void pushImage(const std::string& name, const cv::UMat& img);
     bool popImage(const std::string& name, cv::UMat& img);

@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <mutex>
 #include <thread>
@@ -21,6 +22,9 @@ std::mutex LowguiRootPlan::s_captureMtx;
 std::condition_variable LowguiRootPlan::s_captureCv;
 long LowguiRootPlan::s_captureRequested = 0;
 long LowguiRootPlan::s_captureDone = 0;
+std::atomic<std::uint64_t> LowguiRootPlan::s_frameDrawStartGen{0};
+std::atomic<std::uint64_t> LowguiRootPlan::s_frameDrawEndGen{0};
+std::uint64_t LowguiRootPlan::s_captureRequestedGen = 0;
 
 }
 }
@@ -144,7 +148,7 @@ int Lowgui::waitKey(int delay) {
     }
 
     if (std::getenv("LOWGUI_HEADLESS_RENDER")) {
-        long id = LowguiRootPlan::requestFrameCapture();
+        long id = LowguiRootPlan::requestFrameCapture(WindowManager::instance().generation());
         if (!LowguiRootPlan::waitForFrameCapture(id, kCaptureTimeoutMs)) {
             CV_LOG_WARNING(nullptr, "lowgui: timed out waiting for framebuffer capture");
         }
