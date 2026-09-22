@@ -2,7 +2,7 @@
 set -euo pipefail
 
 HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DIR="$HOME/../Plan-V4D/"
+DIR="$HOME/Plan-V4D/"
 OPENCV_DIR="$HOME/opencv"
 BUILD_DIR="$OPENCV_DIR/build"
 BUILD_MARKER="$BUILD_DIR/.build-type"
@@ -112,7 +112,12 @@ if [ -n "${SAN:-}" ]; then
 fi
 
 if [ ! -d "$OPENCV_DIR" ]; then
-  git clone git@github.com:kallaballa/opencv.git "$OPENCV_DIR"
+  # Prefer SSH (fast for repo owners), fall back to HTTPS so developers and CI
+  # without GitHub SSH keys can bootstrap the build.
+  if ! git clone git@github.com:kallaballa/opencv.git "$OPENCV_DIR" 2>/dev/null; then
+    rm -rf "$OPENCV_DIR"
+    git clone https://github.com/kallaballa/opencv.git "$OPENCV_DIR"
+  fi
 fi
 
 if [ -f "$BUILD_MARKER" ] && [ "$(cat "$BUILD_MARKER")" != "$BUILD_TYPE" ]; then
@@ -135,6 +140,9 @@ CMAKE_ARGS=(
   -DOPENCV_ALGO_HINT_DEFAULT=ALGO_HINT_APPROX
   -DCMAKE_MODULE_LINKER_FLAGS="/usr/local/lib64/"
   -DINSTALL_BIN_EXAMPLES=OFF
+  -DBUILD_EXAMPLES=ON
+  -DBUILD_PACKAGE=OFF
+  -DBUILD_DOCS=OFF
   -DCV_TRACE=OFF
   -DBUILD_SHARED_LIBS=ON
   -DWITH_OPENGL=ON
@@ -246,9 +254,6 @@ CMAKE_ARGS=(
   -DBUILD_opencv_xphoto=OFF
   -DBUILD_opencv_world=OFF
   -DBUILD_opencv_lowgui=ON
-  -DBUILD_EXAMPLES=ON
-  -DBUILD_PACKAGE=OFF
-  -DBUILD_DOCS=OFF
   -DWITH_PTHREADS_PF=ON
   -DCV_ENABLE_INTRINSICS=ON
   -DBUILD_opencv_video=ON

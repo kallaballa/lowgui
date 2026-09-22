@@ -7,16 +7,14 @@ using namespace cv;
 using namespace cv::lowgui;
 
 int main(int argc, char** argv) {
-    std::string imgFile = argc > 1 ? argv[1] : cv::samples::findFile("lena.png");
-    cv::Mat img = cv::imread(imgFile);
-    if (img.empty()) {
-        std::cerr << "Could not load image: " << imgFile << std::endl;
-        return 1;
-    }
+    cv::UMat img(1024, 768, CV_8UC3);
 
-    Lowgui::namedWindow("lowgui demo");
-    Lowgui::imshow("lowgui demo", img);
-    Lowgui::waitKey(0);
+    for(size_t i = 0; i < 255*255; ++i) {
+        img.setTo(i);
+        Lowgui::namedWindow("lowgui demo");
+        Lowgui::imshow("lowgui demo", img);
+        Lowgui::waitKey(0);
+    }
 
     Lowgui::destroyAllWindows();
     return 0;

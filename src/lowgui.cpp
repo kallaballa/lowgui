@@ -26,6 +26,19 @@ std::atomic<std::uint64_t> LowguiRootPlan::s_frameDrawStartGen{0};
 std::atomic<std::uint64_t> LowguiRootPlan::s_frameDrawEndGen{0};
 std::uint64_t LowguiRootPlan::s_captureRequestedGen = 0;
 
+std::map<std::string, LowguiRootPlan::ViewState> LowguiRootPlan::s_viewStates;
+std::string LowguiRootPlan::s_activeWindow;
+std::atomic<bool> LowguiRootPlan::s_headless{false};
+
+}
+
+}
+}
+    if (key >= K::A && key <= K::Z) return 'A' + (key - K::A);
+    if (key >= K::N0 && key <= K::N9) return '0' + (key - K::N0);
+    return static_cast<int>(key);
+}
+
 }
 }
 }
@@ -64,6 +77,7 @@ bool shouldRenderOffscreen() {
 
 void engineFn(bool offscreen) {
     try {
+        LowguiRootPlan::setHeadless(offscreen);
         cv::Rect viewport(0, 0, 960, 960);
         cv::Ptr<V4D> runtime = V4D::init(viewport, "lowgui",
                                          AllocateFlags::NANOVG | AllocateFlags::IMGUI,
@@ -130,7 +144,10 @@ void Lowgui::imshow(const std::string& winname, InputArray mat) {
     wm.pushImage(winname, umat);
 }
 
-int Lowgui::waitKey(int delay) {
+namespace {
+// TEMP: base behavior for bisection
+int waitKeyImpl(int delay, bool lowByte) {
+    (void)lowByte;
     static const int kCaptureTimeoutMs = 10000;
 
     if (WindowManager::instance().windowCount() == 0) {
@@ -141,8 +158,6 @@ int Lowgui::waitKey(int delay) {
     startEngine(shouldRenderOffscreen());
 
     if (!gEngineLoopAlive.load()) {
-        // The engine exited on its own (e.g. the window was closed in windowed
-        // mode). The V4D loop cannot be restarted, so degrade to a sleep.
         if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         return -1;
     }
@@ -154,8 +169,6 @@ int Lowgui::waitKey(int delay) {
         }
     } else {
         LowguiRootPlan::clearFramebuffer();
-        // OpenCV semantics for waitKey(0): block until the user closes the
-        // window. In offscreen mode there is nothing to wait for interactively.
         if (delay == 0 && !gEngineModeOffscreen.load()) {
             waitEngineFinished();
         }
@@ -164,13 +177,18 @@ int Lowgui::waitKey(int delay) {
     if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
     return -1;
 }
+} // namespace
+
+int Lowgui::waitKey(int delay) {
+    return waitKeyImpl(delay, true);
+}
 
 int Lowgui::pollKey() {
     return -1;
 }
 
 int Lowgui::waitKeyEx(int delay) {
-    return waitKey(delay);
+    return waitKeyImpl(delay, false);
 }
 
 void Lowgui::destroyWindow(const std::string& winname) {

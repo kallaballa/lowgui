@@ -85,6 +85,12 @@ sudo ./scripts/build-vm-image.sh
 
 The `run-tests-in-vm.sh` script inside the VM mounts the source tree via virtio-9p, builds with `build.sh -t plan+v4d+lowgui`, and executes both `opencv_test_lowgui` and `opencv_test_lowgui_offscreen`. JUnit XML results are copied to the output mount.
 
+## Known limitations
+
+- `waitKey` returns OpenCV-style key codes for keys pressed while a lowgui window has focus. In headless/offscreen mode (`LOWGUI_HEADLESS_RENDER`, `LOWGUI_FORCE_OFFSCREEN`, or no display server) there is no keyboard input source, so `waitKey`/`waitKeyEx` return `-1` after the delay and `pollKey` always returns `-1`.
+- The render engine and its native (GLFW) window can only be started once per process — V4D's loop is not restartable. Closing the native window terminates the engine; after that `waitKey` returns `-1` (promptly or after the delay) until the process exits. `destroyWindow`/`destroyAllWindows` without closing the native window are safe and re-openable.
+- `imshow` of an image with an unsupported depth (e.g. `CV_32S`) is skipped for that window with a logged warning rather than terminating the render engine.
+
 ## CI
 
 GitHub Actions runs the QEMU workflow and an xvfb workflow on push/PR to `main`/`master`. The VM image is cached and rebuilt only when provisioning scripts change.

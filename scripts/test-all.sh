@@ -70,11 +70,22 @@ if [ -z "$GTEST_BIN" ] || [ ! -x "$GTEST_BIN" ]; then
 else
   log "Using test binary: $GTEST_BIN"
 
-  # 3. Non-rendering tests
-  run_test "unit-tests" "$GTEST_BIN --gtest_filter=-*Rendering*"
+  # 3. Main test binary (no rendering tests inside; run the full suite)
+  run_test "unit-tests" "$GTEST_BIN"
 
-  # 4. Rendering tests (Xvfb)
-  run_test "rendering-tests" "xvfb-run -a $GTEST_BIN --gtest_filter=*Rendering*"
+  # 4. Offscreen rendering tests (Xvfb / llvmpipe)
+  OFFSCREEN_BIN="${REPO_ROOT}/opencv/build/bin/opencv_test_lowgui_offscreen"
+  if [ ! -x "$OFFSCREEN_BIN" ]; then
+    OFFSCREEN_BIN="$(find "$REPO_ROOT" -maxdepth 3 -type f -name 'opencv_test_lowgui_offscreen*' -perm -111 | head -n1 || true)"
+  fi
+  if [ -z "$OFFSCREEN_BIN" ] || [ ! -x "$OFFSCREEN_BIN" ]; then
+    log "ERROR: opencv_test_lowgui_offscreen binary not found"
+    RESULTS+=("FAIL: offscreen-rendering-binary-not-found")
+    FAIL=$((FAIL + 1))
+  else
+    log "Using offscreen test binary: $OFFSCREEN_BIN"
+    run_test "offscreen-rendering" "xvfb-run -a $OFFSCREEN_BIN"
+  fi
 fi
 
 # 5. QEMU system tests
