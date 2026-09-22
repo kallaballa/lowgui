@@ -131,7 +131,7 @@ void Lowgui::imshow(const std::string& winname, InputArray mat) {
         // Matches highgui: imshow auto-creates missing windows (AUTOSIZE).
         wm.createWindow(winname, WINDOW_AUTOSIZE);
     }
-    cv::UMat umat = mat.getUMat(cv::ACCESS_READ);
+    cv::UMat umat = mat.getUMat();
     wm.pushImage(winname, umat);
 }
 

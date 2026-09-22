@@ -120,7 +120,7 @@ TEST_F(WindowManagerTest, pushImage_grayscale_color_and_empty) {
     WindowManager::instance().createWindow("win3", 0);
 
     cv::UMat grayU(5, 5, CV_8UC1);
-    cv::UMat colorU(5, 5, CV_8UC1);
+    cv::UMat colorU(5, 5, CV_8UC3);
     grayU.setTo(0);
     colorU.setTo(0);
 
