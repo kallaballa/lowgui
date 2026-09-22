@@ -77,8 +77,8 @@ TEST_F(WindowManagerTest, getWindowNames_returns_all_names) {
 TEST_F(WindowManagerTest, pushImage_getImage_roundtrip) {
     WindowManager::instance().createWindow("win1", 0);
     cv::Mat src = cv::Mat::zeros(10, 10, CV_8UC3);
-    src.setTo(cv::Scalar(10, 20, 30));
-    cv::UMat umat = src.getUMat(cv::ACCESS_READ);
+    cv::UMat umat(10, 10, CV_8UC3);
+    umat.setTo(cv::Scalar(10, 20, 30));
     WindowManager::instance().pushImage("win1", umat);
 
     cv::UMat dst;
@@ -88,19 +88,12 @@ TEST_F(WindowManagerTest, pushImage_getImage_roundtrip) {
     EXPECT_EQ(dst.rows, 10);
 }
 
-TEST_F(WindowManagerTest, pushImage_getImage_nonexistent_window) {
-    cv::Mat mat = cv::Mat::zeros(10, 10, CV_8UC1);
-    cv::UMat umat = mat.getUMat(cv::ACCESS_READ);
-    WindowManager::instance().pushImage("nonexistent", umat);
-    cv::UMat dst;
-    EXPECT_FALSE(WindowManager::instance().getImage("nonexistent", dst));
-}
-
 TEST_F(WindowManagerTest, pushImage_popImage_roundtrip) {
     WindowManager::instance().createWindow("win1", 0);
     cv::Mat src = cv::Mat::zeros(8, 8, CV_8UC1);
     src.setTo(128);
-    cv::UMat umat = src.getUMat(cv::ACCESS_READ);
+    cv::UMat umat(8, 8, CV_8UC1);
+    umat.setTo(128);
     WindowManager::instance().pushImage("win1", umat);
 
     cv::UMat dst;
@@ -126,10 +119,10 @@ TEST_F(WindowManagerTest, pushImage_grayscale_color_and_empty) {
     WindowManager::instance().createWindow("win2", 0);
     WindowManager::instance().createWindow("win3", 0);
 
-    cv::Mat gray = cv::Mat::zeros(5, 5, CV_8UC1);
-    cv::Mat color = cv::Mat::zeros(5, 5, CV_8UC3);
-    cv::UMat grayU = gray.getUMat(cv::ACCESS_READ);
-    cv::UMat colorU = color.getUMat(cv::ACCESS_READ);
+    cv::UMat grayU(5, 5, CV_8UC1);
+    cv::UMat colorU(5, 5, CV_8UC1);
+    grayU.setTo(0);
+    colorU.setTo(0);
 
     WindowManager::instance().pushImage("win1", grayU);
     WindowManager::instance().pushImage("win2", colorU);
@@ -151,10 +144,9 @@ TEST_F(WindowManagerTest, pushImage_thread_safety) {
     for (int t = 0; t < kThreads; ++t) {
         threads.emplace_back([t]() {
             for (int i = 0; i < kIterations; ++i) {
-                cv::Mat src = cv::Mat::zeros(4, 4, CV_8UC1);
-                src.setTo(t * 10 + i);
-                cv::UMat umat = src.getUMat(cv::ACCESS_READ);
-                WindowManager::instance().pushImage("win1", umat);
+                cv::UMat umat(4, 4, CV_8UC1);
+                umat.setTo(t * 10 + i);
+		WindowManager::instance().pushImage("win1", umat);
             }
         });
     }

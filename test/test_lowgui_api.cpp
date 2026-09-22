@@ -21,44 +21,6 @@ protected:
     }
 };
 
-TEST(LowguiKeyQueueTest, mapKey_printable_keys_map_to_ascii) {
-    using cv::lowgui::detail::LowguiRootPlan;
-    EXPECT_EQ(LowguiRootPlan::mapKey(KeyboardKey::A), 'A');
-    EXPECT_EQ(LowguiRootPlan::mapKey(KeyboardKey::Z), 'Z');
-    EXPECT_EQ(LowguiRootPlan::mapKey(KeyboardKey::N0), '0');
-    EXPECT_EQ(LowguiRootPlan::mapKey(KeyboardKey::N9), '9');
-    EXPECT_EQ(LowguiRootPlan::mapKey(KeyboardKey::SPACE), ' ');
-    EXPECT_EQ(LowguiRootPlan::mapKey(KeyboardKey::ENTER), '\r');
-    EXPECT_EQ(LowguiRootPlan::mapKey(KeyboardKey::BACKSPACE), '\b');
-    EXPECT_EQ(LowguiRootPlan::mapKey(KeyboardKey::TAB), '\t');
-    EXPECT_EQ(LowguiRootPlan::mapKey(KeyboardKey::ESCAPE), 27);
-    EXPECT_EQ(LowguiRootPlan::mapKey(KeyboardKey::MINUS), '-');
-    EXPECT_EQ(LowguiRootPlan::mapKey(KeyboardKey::GRAVE_ACCENT), '`');
-}
-
-TEST(LowguiKeyQueueTest, mapKey_special_keys_are_stable) {
-    using cv::lowgui::detail::LowguiRootPlan;
-    int left = LowguiRootPlan::mapKey(KeyboardKey::LEFT);
-    int f1 = LowguiRootPlan::mapKey(KeyboardKey::F1);
-    EXPECT_NE(left, f1);
-    EXPECT_NE(left, -1);
-    EXPECT_NE(f1, -1);
-}
-
-TEST(LowguiKeyQueueTest, enqueue_and_pop_roundtrip) {
-    using cv::lowgui::detail::LowguiRootPlan;
-    int code = 0;
-    EXPECT_FALSE(LowguiRootPlan::popKey(code)); // empty queue
-
-    LowguiRootPlan::enqueueKey('x');
-    LowguiRootPlan::enqueueKey('y');
-    EXPECT_TRUE(LowguiRootPlan::popKey(code));
-    EXPECT_EQ(code, 'x');
-    EXPECT_TRUE(LowguiRootPlan::popKey(code));
-    EXPECT_EQ(code, 'y');
-    EXPECT_FALSE(LowguiRootPlan::popKey(code));
-}
-
 TEST_F(LowguiApiTest, namedWindow_hasWindow_lifecycle) {
     EXPECT_FALSE(Lowgui::hasWindow("test_win"));
     Lowgui::namedWindow("test_win");

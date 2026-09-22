@@ -34,14 +34,6 @@ std::atomic<bool> LowguiRootPlan::s_headless{false};
 
 }
 }
-    if (key >= K::A && key <= K::Z) return 'A' + (key - K::A);
-    if (key >= K::N0 && key <= K::N9) return '0' + (key - K::N0);
-    return static_cast<int>(key);
-}
-
-}
-}
-}
 
 using namespace cv::lowgui;
 using namespace cv::lowgui::detail;
@@ -139,8 +131,7 @@ void Lowgui::imshow(const std::string& winname, InputArray mat) {
         // Matches highgui: imshow auto-creates missing windows (AUTOSIZE).
         wm.createWindow(winname, WINDOW_AUTOSIZE);
     }
-    cv::Mat cpu = mat.getMat();
-    cv::UMat umat = cpu.getUMat(cv::ACCESS_READ);
+    cv::UMat umat = mat.getUMat(cv::ACCESS_READ);
     wm.pushImage(winname, umat);
 }
 

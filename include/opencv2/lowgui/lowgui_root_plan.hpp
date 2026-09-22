@@ -315,7 +315,8 @@ private:
             cv::Mat tmp = cv::imread(st.newFilename, cv::IMREAD_UNCHANGED);
             auto& wm = WindowManager::instance();
             if (!tmp.empty() && wm.hasWindow(name)) {
-                cv::UMat umat = tmp.getUMat(cv::ACCESS_READ);
+                cv::UMat umat;
+	        tmp.copyTo(umat);
                 wm.pushImage(name, umat);
                 st.lastImageSaveOk = true;
                 st.lastImageSaveMsg = "Loaded " + st.newFilename;
@@ -1258,16 +1259,9 @@ private:
         GL_CHECK(glReadBuffer(GL_COLOR_ATTACHMENT0));
         GL_CHECK(glFinish());
         GL_CHECK(glReadPixels(0, 0, sz.width, sz.height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data));
-
-        cv::Mat flipped;
-        cv::flip(rgba, flipped, 0);
-
-        // Clone into an independent UMat: getUMat() only maps the (stack) Mat's
-        // memory, so storing it directly would leave s_framebuffer dangling once
-        // 'flipped' is destroyed at the end of this scope.
-        cv::UMat host = flipped.getUMat(cv::ACCESS_READ);
+	
         std::lock_guard<std::mutex> lock(s_fbMutex);
-        s_framebuffer = host.clone();
+        cv::flip(rgba, s_framebuffer, 0);
     }
 };
 
