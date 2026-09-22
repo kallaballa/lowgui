@@ -119,7 +119,7 @@ TEST_F(OffscreenRenderingTest, four_windows_grid_layout) {
     cv::Mat exp_r(480, 480, CV_8UC4, cv::Scalar(255, 0,   0,   255));
     cv::Mat exp_g(480, 480, CV_8UC4, cv::Scalar(0,   255, 0,   255));
     cv::Mat exp_b(480, 480, CV_8UC4, cv::Scalar(0,   0,   255, 255));
-    cv::Mat exp_y(480, 480, CV_8UC4, cv::Scalar(0,   255, 255, 255));
+    cv::Mat exp_y(480, 480, CV_8UC4, cv::Scalar(255, 255, 0, 255));
 
     EXPECT_LT(cv::norm(q1, exp_r, cv::NORM_INF), 3);
     EXPECT_LT(cv::norm(q2, exp_g, cv::NORM_INF), 3);

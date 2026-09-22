@@ -100,7 +100,7 @@ private:
     // already been flushed. Only the single worker plan runs drawWindows, so
     // this map needs no extra locking. deleteImage is only invoked while the
     // nvg context is current (inside the nvg node), which is satisfied here.
-    std::map<std::string, int> imageHandles_;
+    std::map<std::string, std::pair<int, cv::Mat>> imageHandles_;
 
     void drawWindows(const cv::Size& sz) {
         using namespace cv::v4d::nvg;
@@ -110,7 +110,7 @@ private:
         // Reclaim handles for windows destroyed since the last frame.
         for (auto it = imageHandles_.begin(); it != imageHandles_.end();) {
             if (std::find(names.begin(), names.end(), it->first) == names.end()) {
-                if (it->second > 0) deleteImage(it->second);
+                if (it->second.first > 0) deleteImage(it->second.first);
                 it = imageHandles_.erase(it);
             } else {
                 ++it;
@@ -148,11 +148,13 @@ private:
             // end of the previous nvg node) before creating the new one.
             auto it = imageHandles_.find(names[i]);
             if (it != imageHandles_.end()) {
-                if (it->second > 0) deleteImage(it->second);
+                if (it->second.first > 0) deleteImage(it->second.first);
                 imageHandles_.erase(it);
             }
 
             save();
+            scissor(vp.x, vp.y, vp.width, vp.height);
+            CV_LOG_INFO(nullptr, "LOWGUI-DBG drawWindows scissor vp=(" << vp.x << "," << vp.y << "," << vp.width << "," << vp.height << ") name=" << names[i] << " img=" << rgba8.cols << "x" << rgba8.rows);
             // Cover (not contain) the cell: the grid lays each window out to
             // fill its cell, cropping the image when its aspect ratio differs
             // from the cell's (matches the test expectations and highgui's
@@ -167,13 +169,14 @@ private:
             scale(sc, sc);
 
             cv::Mat host = rgba8.getMat(cv::ACCESS_READ);
-            int handle = createImageRGBA(rgba8.cols, rgba8.rows, NVG_IMAGE_NEAREST, host.data);
+            cv::Mat hostCopy = host.clone();
+            int handle = createImageRGBA(rgba8.cols, rgba8.rows, NVG_IMAGE_NEAREST, hostCopy.data);
             if (handle > 0) {
                 beginPath();
                 rect(0, 0, (float)rgba8.cols, (float)rgba8.rows);
                 fillPaint(imagePattern(0, 0, (float)rgba8.cols, (float)rgba8.rows, 0.0f, handle, 1.0f));
                 fill();
-                imageHandles_[names[i]] = handle;
+                imageHandles_[names[i]] = std::make_pair(handle, hostCopy);
             }
             restore();
         }

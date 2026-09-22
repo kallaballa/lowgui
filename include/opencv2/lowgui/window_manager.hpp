@@ -4,7 +4,7 @@
 #include <opencv2/core.hpp>
 #include <opencv2/lowgui/sink_source.hpp>
 #include <string>
-#include <map>
+#include <unordered_map>
 #include <memory>
 #include <mutex>
 #include <condition_variable>
@@ -41,7 +41,8 @@ struct WindowData {
 class WindowManager {
     // Windows are owned via shared_ptr so concurrent render/API accessors can
     // hold a reference across a destroyWindow() call instead of dangling.
-    std::map<std::string, std::shared_ptr<WindowData>> windows_;
+    std::unordered_map<std::string, std::shared_ptr<WindowData>> windows_;
+    std::vector<std::string> windowOrder_;
     mutable std::mutex mtx_;
     std::condition_variable cv_;
     bool running_ = false;

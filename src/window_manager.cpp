@@ -1,5 +1,6 @@
 #include <opencv2/lowgui/window_manager.hpp>
 #include <vector>
+#include <algorithm>
 
 namespace cv {
 namespace lowgui {
@@ -15,18 +16,21 @@ void WindowManager::createWindow(const std::string& name, int flags) {
     auto it = windows_.find(name);
     if (it == windows_.end()) {
         windows_.emplace(name, std::make_shared<WindowData>(name, name, flags));
+        windowOrder_.push_back(name);
     }
 }
 
 void WindowManager::destroyWindow(const std::string& name) {
     std::lock_guard<std::mutex> lock(mtx_);
     windows_.erase(name);
+    windowOrder_.erase(std::remove(windowOrder_.begin(), windowOrder_.end(), name), windowOrder_.end());
     cv_.notify_all();
 }
 
 void WindowManager::destroyAllWindows() {
     std::lock_guard<std::mutex> lock(mtx_);
     windows_.clear();
+    windowOrder_.clear();
     cv_.notify_all();
 }
 
@@ -96,11 +100,7 @@ std::shared_ptr<const WindowData> WindowManager::getWindowShared(const std::stri
 
 std::vector<std::string> WindowManager::getWindowNames() const {
     std::lock_guard<std::mutex> lock(mtx_);
-    std::vector<std::string> names;
-    for (const auto& kv : windows_) {
-        names.push_back(kv.first);
-    }
-    return names;
+    return windowOrder_;
 }
 
 void WindowManager::setRunning(bool r) {
