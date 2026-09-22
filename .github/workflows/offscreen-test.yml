@@ -1,0 +1,95 @@
+name: QEMU Isolated Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-vm-image:
+    runs-on: ubuntu-latest
+    outputs:
+      image-path: ${{ steps.build.outputs.image-path }}
+      kernel-path: ${{ steps.build.outputs.kernel-path }}
+      initrd-path: ${{ steps.build.outputs.initrd-path }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y qemu-utils debootstrap parted
+      - name: Build VM image
+        id: build
+        run: |
+          sudo ./scripts/build-vm-image.sh
+          echo "image-path=$(pwd)/lowgui-test.img" >> $GITHUB_OUTPUT
+          echo "kernel-path=$(pwd)/vmlinuz" >> $GITHUB_OUTPUT
+          echo "initrd-path=$(pwd)/initrd.img" >> $GITHUB_OUTPUT
+      - name: Cache VM image
+        uses: actions/cache@v4
+        with:
+          path: |
+            lowgui-test.img
+            vmlinuz
+            initrd.img
+            vm-key
+          key: vm-image-${{ hashFiles('scripts/build-vm-image.sh', 'scripts/provision-chroot.sh') }}
+
+  xvfb-tests:
+    runs-on: ubuntu-latest
+    needs: build-vm-image
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y xvfb libgl1-mesa-dri mesa-utils
+      - name: Clone dependencies
+        run: |
+          git clone --depth 1 https://github.com/kallaballa/opencv.git ../opencv
+          git clone --depth 1 https://github.com/kallaballa/Plan-V4D.git ../Plan-V4D
+      - name: Build
+        run: ./build.sh -t plan+v4d+lowgui -j$(nproc)
+      - name: Run offscreen tests
+        run: xvfb-run -a ./bin/opencv_test_lowgui_offscreen --gtest_output=xml:offscreen-results.xml
+      - name: Run main tests under Xvfb
+        run: xvfb-run -a ./bin/opencv_test_lowgui --gtest_output=xml:main-results.xml
+      - name: Upload offscreen results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offscreen-test-results
+          path: |
+            offscreen-results.xml
+            main-results.xml
+
+  qemu-tests:
+    needs: build-vm-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore cached VM image
+        uses: actions/cache@v4
+        with:
+          path: |
+            lowgui-test.img
+            vmlinuz
+            initrd.img
+            vm-key
+          key: vm-image-${{ hashFiles('scripts/build-vm-image.sh', 'scripts/provision-chroot.sh') }}
+      - name: Clone dependencies
+        run: |
+          git clone --depth 1 https://github.com/kallaballa/opencv.git ../opencv
+          git clone --depth 1 https://github.com/kallaballa/Plan-V4D.git ../Plan-V4D
+      - name: Run tests in QEMU
+        run: |
+          ./scripts/vm-boot-and-test.sh \
+            --image lowgui-test.img \
+            --kernel vmlinuz \
+            --initrd initrd.img \
+            --repo-path ${{ github.workspace }}/.. \
+            --ssh-key vm-key \
+            --out-dir ${{ runner.temp }}/qemu-out
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-test-results
+          path: ${{ runner.temp }}/qemu-out/**
