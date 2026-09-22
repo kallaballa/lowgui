@@ -1,9 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DIR="$HOME/Plan-V4D/"
-OPENCV_DIR="$HOME/opencv"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIR="$SCRIPT_DIR/Plan-V4D/"
+OPENCV_DIR="$SCRIPT_DIR/opencv"
 BUILD_DIR="$OPENCV_DIR/build"
 BUILD_MARKER="$BUILD_DIR/.build-type"
 JOBS=4
@@ -260,7 +260,7 @@ CMAKE_ARGS=(
   -DBUILD_opencv_plan=ON
   -DBGFX_CONFIG_MULTITHREADED=ON
   -DBGFX_CONFIG_PASSIVE=ON
-  -DOPENCV_EXTRA_MODULES_PATH="$DIR/modules;$HOME"
+  -DOPENCV_EXTRA_MODULES_PATH="$DIR/modules;$SCRIPT_DIR"
   -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE"
 )
 

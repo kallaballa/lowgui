@@ -4,6 +4,7 @@
 #include <opencv2/core.hpp>
 #include <opencv2/v4d/v4d.hpp>
 #include <functional>
+#include <memory>
 #include <mutex>
 
 namespace cv {
@@ -16,7 +17,7 @@ namespace detail {
  * This class holds a single image buffer that can be pushed from external threads
  * and consumed by the V4D runtime through a generator function.
  */
-class CV_EXPORTS SinkSource {
+class CV_EXPORTS SinkSource : public std::enable_shared_from_this<SinkSource> {
     cv::UMat frame_;
     bool has_frame_ = false;
     float fps_ = 30.0f;
@@ -105,10 +106,22 @@ public:
     /**
      * @brief Creates a cv::v4d::Source from this SinkSource.
      * 
+     * The Source keeps the SinkSource alive for as long as it is referenced, so
+     * it must be shared (e.g. created via cv::makePtr or owned through a
+     * shared_ptr) for the ownership to be safe. If called on a non-shared
+     * instance an always-empty Source is returned instead of risking a dangling
+     * capture. WindowManager-owned SinkSources are shared.
+     * 
      * @return A Source object that wraps this buffer.
      */
     cv::Ptr<cv::v4d::Source> toSource() {
-        auto self = this;
+        std::shared_ptr<SinkSource> self = weak_from_this().lock();
+        if (!self) {
+            return cv::makePtr<cv::v4d::Source>(
+                [](cv::UMat&) -> bool { return false; },
+                fps_
+            );
+        }
         return cv::makePtr<cv::v4d::Source>(
             [self](cv::UMat& frame) -> bool {
                 cv::UMat result = self->next();

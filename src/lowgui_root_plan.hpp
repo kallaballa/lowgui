@@ -20,8 +20,10 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/lowgui/window_manager.hpp>
+#include "lowgui_input.hpp"
 #include <sstream>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace cv {
@@ -60,6 +62,13 @@ public:
         cv::Mat rgbaCopy;         // keeps the texture's source pixels alive ("filename")
         std::string label;
 
+        // Texture-cache bookkeeping: the last WindowData::contentSerial that
+        // was uploaded (or rejected) for this window. kNeverUploaded forces the
+        // first upload; unchanged content skips the per-frame re-encode/upload.
+        static constexpr std::uint64_t kNeverUploaded = ~std::uint64_t(0);
+        std::uint64_t uploadedSerial = kNeverUploaded;
+        std::uint64_t badSerial = kNeverUploaded;
+
         // View transform (viewport-local coordinates)
         float zoom = 1.0f;
         cv::Point2f pan = {0.0f, 0.0f};
@@ -73,6 +82,10 @@ public:
         bool showProperties = false;
         bool showHelp = true;
         bool showStatusBar = true;
+        // Set by the worker on right-click (Qt context menu); consumed by gui().
+        bool showContextMenu = false;
+        // Global "Display properties window" control panel (trackbars/buttons).
+        bool showControlPanel = false;
 
         // Deep zoom threshold (mirrors OpenCV's QT imshow behaviour).
         static constexpr float kDeepZoomThreshold = 30.0f;
@@ -110,6 +123,11 @@ private:
     static std::string s_activeWindow;
     static std::atomic<bool> s_headless;
 
+    // Last native-window size drawn by the worker, so API calls on other
+    // threads (getWindowImageRect) can compute cell rects without a V4D handle.
+    static std::atomic<int> s_winW;
+    static std::atomic<int> s_winH;
+
     // NanoVG image handles to freed in the next nvg node (collected by
     // reconcileStates when a window disappears). Worker thread only.
     std::vector<int> orphanedTextures_;
@@ -134,10 +152,30 @@ private:
     static std::atomic<std::uint64_t> s_frameDrawEndGen;
     static std::uint64_t s_captureRequestedGen;
 
+    // Monotonically increased (under s_frameDrawMtx) whenever drawWindows drew
+    // a settled frame (startGen==endGen). waitKey uses it to present at least
+    // one settled frame before returning instead of blocking on window close.
+    static std::atomic<std::uint64_t> s_frameDrawDoneGen;
+    static std::mutex s_frameDrawMtx;
+    static std::condition_variable s_frameDrawCv;
+
 public:
     LowguiRootPlan() = default;
 
     static void setHeadless(bool value) { s_headless.store(value); }
+
+    // Last native-window size drawn by the worker (0,0 before the first frame).
+    static cv::Size windowSize() {
+        return cv::Size(s_winW.load(std::memory_order_relaxed),
+                        s_winH.load(std::memory_order_relaxed));
+    }
+
+    // Cell rect of a window in the current layout (used by getWindowImageRect).
+    static cv::Rect viewportFor(const std::string& name, const cv::Size& sz);
+
+    // Wakes settled-frame waiters (used by setWindowProperty(FULLSCREEN) so a
+    // subsequent waitKey(0) presents the updated layout/fullscreen state).
+    static void notifySettledFrame(std::uint64_t gen);
 
     static cv::UMat getFramebuffer() {
         std::lock_guard<std::mutex> lock(s_fbMutex);
@@ -162,6 +200,14 @@ public:
             [id]() { return s_captureDone >= id; });
     }
 
+    // Blocks until the render loop has drawn a settled frame whose window-set
+    // generation is at least gen, or until the timeout elapses.
+    static bool waitForSettledFrame(std::uint64_t gen, int timeoutMs) {
+        std::unique_lock<std::mutex> lock(s_frameDrawMtx);
+        return s_frameDrawCv.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+            [gen]() { return s_frameDrawDoneGen.load() >= gen; });
+    }
+
     void setup() override {
         set(GlobalState::Keys::TIME_TRACKER, V(false));
         set(GlobalState::Keys::SHOW_FRAME_TIME, V(false));
@@ -181,12 +227,22 @@ public:
 
         // Reconcile is a plain node, but input routing needs a settled window
         // set immediately, so it runs right after on the same worker thread.
+        plain([](const Keyboard::List& pressEvents,
+                 const Keyboard::List& releaseEvents) {
+            handleKeys(pressEvents, releaseEvents);
+        }, keyPress_, keyRelease_);
+
         plain([](const Mouse::List& scrollEvents,
                  const Mouse::List& dragEvents,
                  const Mouse::List& pressLeftEvents,
                  const Mouse::List& releaseLeftEvents,
                  const Mouse::List& pressRightEvents,
+                 const Mouse::List& releaseRightEvents,
                  const Mouse::List& pressMiddleEvents,
+                 const Mouse::List& releaseMiddleEvents,
+                 const Mouse::List& doubleClickLeftEvents,
+                 const Mouse::List& doubleClickRightEvents,
+                 const Mouse::List& doubleClickMiddleEvents,
                  const Mouse::List& moveEvents,
                  const Mouse::List& hoverEnterEvents,
                  const Mouse::List& hoverExitEvents,
@@ -194,10 +250,14 @@ public:
                  std::map<std::string, ViewState>& states,
                  std::string& activeWindow) {
             handleInput(scrollEvents, dragEvents, pressLeftEvents, releaseLeftEvents,
-                        pressRightEvents, pressMiddleEvents, moveEvents, hoverEnterEvents,
-                        hoverExitEvents, sz, states, activeWindow);
-        }, scroll_, drag_, pressLeft_, releaseLeft_, pressRight_, pressMiddle_,
-           move_, hoverEnter_, hoverExit_, size_, RWS(s_viewStates), RWS(s_activeWindow));
+                        pressRightEvents, releaseRightEvents, pressMiddleEvents,
+                        releaseMiddleEvents, doubleClickLeftEvents, doubleClickRightEvents,
+                        doubleClickMiddleEvents, moveEvents, hoverEnterEvents, hoverExitEvents,
+                        sz, states, activeWindow);
+        }, scroll_, drag_, pressLeft_, releaseLeft_, pressRight_, releaseRight_,
+           pressMiddle_, releaseMiddle_, doubleClickLeft_, doubleClickRight_,
+           doubleClickMiddle_, move_, hoverEnter_, hoverExit_, size_,
+           RWS(s_viewStates), RWS(s_activeWindow));
 
         // Draw every window (image + grid + deep-zoom overlay + status bar).
         nvg([this](const cv::Size& sz, std::map<std::string, ViewState>& states) {
@@ -240,10 +300,27 @@ private:
     Event<Mouse> pressLeft_   = E<Mouse>(Mouse::PRESS,   Mouse::LEFT);
     Event<Mouse> releaseLeft_ = E<Mouse>(Mouse::RELEASE, Mouse::LEFT);
     Event<Mouse> pressRight_  = E<Mouse>(Mouse::PRESS,   Mouse::RIGHT);
+    Event<Mouse> releaseRight_= E<Mouse>(Mouse::RELEASE, Mouse::RIGHT);
     Event<Mouse> pressMiddle_ = E<Mouse>(Mouse::PRESS,   Mouse::MIDDLE);
+    Event<Mouse> releaseMiddle_= E<Mouse>(Mouse::RELEASE, Mouse::MIDDLE);
+    Event<Mouse> doubleClickLeft_   = E<Mouse>(Mouse::DOUBLE_CLICK, Mouse::LEFT);
+    Event<Mouse> doubleClickRight_  = E<Mouse>(Mouse::DOUBLE_CLICK, Mouse::RIGHT);
+    Event<Mouse> doubleClickMiddle_ = E<Mouse>(Mouse::DOUBLE_CLICK, Mouse::MIDDLE);
     Event<Mouse> move_        = E<Mouse>(Mouse::MOVE);
     Event<Mouse> hoverEnter_  = E<Mouse>(Mouse::HOVER_ENTER);
     Event<Mouse> hoverExit_   = E<Mouse>(Mouse::HOVER_EXIT);
+    Event<Keyboard> keyPress_   = E<Keyboard>(Keyboard::PRESS);
+    Event<Keyboard> keyRelease_ = E<Keyboard>(Keyboard::RELEASE);
+
+    // ---------- Key/modifier state (worker thread only) ---------------------
+    // Plain statics are fine: the key node and handleInput are sequential plain
+    // nodes on the same render worker thread.
+    inline static bool sKeyShift = false;
+    inline static bool sKeyCtrl = false;
+    inline static bool sKeyAlt = false;
+    inline static bool sLButton = false;
+    inline static bool sRButton = false;
+    inline static bool sMButton = false;
 
     // ---------- Layout ------------------------------------------------------
 
@@ -262,19 +339,12 @@ private:
             cv::Rect vp = cell;
             auto wd = WindowManager::instance().getWindowShared(names[i]);
             if (wd) {
-                std::lock_guard<std::mutex> lock(wd->sink.mtx);
+                std::lock_guard<std::mutex> lock(wd->sink->mtx);
                 vp = wd->userViewport ? wd->viewport : cell;
             }
             layout.emplace_back(names[i], vp);
         }
         return layout;
-    }
-
-    static cv::Rect viewportFor(const std::string& name, const cv::Size& sz) {
-        for (const auto& e : computeLayout(sz)) {
-            if (e.first == name) return e.second;
-        }
-        return cv::Rect();
     }
 
     void reconcileStates(std::map<std::string, ViewState>& states,
@@ -316,7 +386,7 @@ private:
             auto& wm = WindowManager::instance();
             if (!tmp.empty() && wm.hasWindow(name)) {
                 cv::UMat umat;
-	        tmp.copyTo(umat);
+                tmp.copyTo(umat);
                 wm.pushImage(name, umat);
                 st.lastImageSaveOk = true;
                 st.lastImageSaveMsg = "Loaded " + st.newFilename;
@@ -344,12 +414,47 @@ private:
         return cv::Point2f((float)(p.x - vp.x), (float)(p.y - vp.y));
     }
 
+    // Tracks Shift/Ctrl/Alt (and mouse-button) held state for the mouse
+    // callback flags and delivers key presses to the key queue. Modifier keys
+    // themselves never produce a key code; Ctrl-prefixed combos are consumed by
+    // ImGui/Qt as shortcuts and are suppressed here too.
+    static void handleKeys(const Keyboard::List& pressEvents,
+                           const Keyboard::List& releaseEvents) {
+        using K = Keyboard::Key;
+        for (const auto& e : pressEvents) {
+            K k = e->key();
+            switch (k) {
+                case K::LEFT_SHIFT:  case K::RIGHT_SHIFT:  sKeyShift = true;  continue;
+                case K::LEFT_CONTROL:case K::RIGHT_CONTROL:sKeyCtrl  = true;  continue;
+                case K::LEFT_ALT:    case K::RIGHT_ALT:    sKeyAlt   = true;  continue;
+                default: break;
+            }
+            if (sKeyCtrl) continue; // Ctrl shortcuts never reach the queue.
+            int code = keyToCode(k);
+            if (code > 0) keyQueue().push(code);
+        }
+        for (const auto& e : releaseEvents) {
+            K k = e->key();
+            switch (k) {
+                case K::LEFT_SHIFT:  case K::RIGHT_SHIFT:  sKeyShift = false; break;
+                case K::LEFT_CONTROL:case K::RIGHT_CONTROL:sKeyCtrl  = false; break;
+                case K::LEFT_ALT:    case K::RIGHT_ALT:    sKeyAlt   = false; break;
+                default: break;
+            }
+        }
+    }
+
     static void handleInput(const Mouse::List& scrollEvents,
                             const Mouse::List& dragEvents,
                             const Mouse::List& pressLeftEvents,
                             const Mouse::List& releaseLeftEvents,
                             const Mouse::List& pressRightEvents,
+                            const Mouse::List& releaseRightEvents,
                             const Mouse::List& pressMiddleEvents,
+                            const Mouse::List& releaseMiddleEvents,
+                            const Mouse::List& doubleClickLeftEvents,
+                            const Mouse::List& doubleClickRightEvents,
+                            const Mouse::List& doubleClickMiddleEvents,
                             const Mouse::List& moveEvents,
                             const Mouse::List& hoverEnterEvents,
                             const Mouse::List& hoverExitEvents,
@@ -361,10 +466,19 @@ private:
         auto layout = computeLayout(sz);
         if (layout.empty()) return;
 
-        // Scroll wheel: zoom around the cursor inside the window under it.
+        // Scroll wheel: dispatch Qt callbacks, then zoom around the cursor.
+        // MOUSEWHEEL for the vertical axis, MOUSEHWHEEL for a dominant-horizontal
+        // axis; the delta (notches*120) is packed into the upper 16 flag bits.
         for (auto se : scrollEvents) {
             auto [name, vp] = windowAt(layout, se->position());
             if (name.empty() || !states.count(name)) continue;
+            bool horizontal = std::abs(se->data().x) > std::abs(se->data().y);
+            int delta = (int)(horizontal ? se->data().x : se->data().y);
+            if (delta == 0) delta = 1;
+            int wflags = ((int)(delta * 120) & 0xffff) << 16;
+            dispatchMouse(name, vp, states,
+                          horizontal ? EVENT_MOUSEHWHEEL : EVENT_MOUSEWHEEL,
+                          se->position(), heldButtonFlags() | wflags);
             float factor = (se->data().y > 0) ? 1.1f : (1.0f / 1.1f);
             zoomAt(states[name], toLocal(vp, se->position()), factor);
             activeWindow = name;
@@ -374,11 +488,18 @@ private:
         for (auto pe : pressLeftEvents) {
             auto [name, vp] = windowAt(layout, pe->position());
             if (name.empty() || !states.count(name)) continue;
+            sLButton = true;
+            dispatchMouse(name, vp, states, EVENT_LBUTTONDOWN, pe->position(), heldButtonFlags());
             states[name].isDragging = true;
             activeWindow = name;
         }
-        for (auto& _ : releaseLeftEvents) {
-            for (auto& [name, st] : states) st.isDragging = false;
+        for (auto re : releaseLeftEvents) {
+            sLButton = false;
+            auto [name, vp] = windowAt(layout, re->position());
+            if (name.empty() || !states.count(name)) continue;
+            dispatchMouse(name, vp, states, EVENT_LBUTTONUP, re->position(), heldButtonFlags());
+            states[name].isDragging = false;
+            activeWindow = name;
         }
 
         // Left-drag: pan. Prefer the window under the cursor; fall back to any
@@ -403,20 +524,54 @@ private:
             }
         }
 
-        // Right-click: reset zoom (1:1, centered) on the window under cursor.
+        // Right-click: deliver EVENT_RBUTTONDOWN, then queue the context menu.
+        // Zoom is no longer reset (Qt parity).
         for (auto re : pressRightEvents) {
             auto [name, vp] = windowAt(layout, re->position());
             if (name.empty() || !states.count(name)) continue;
-            resetZoom(states[name], vp.size());
+            sRButton = true;
+            dispatchMouse(name, vp, states, EVENT_RBUTTONDOWN, re->position(), heldButtonFlags());
             activeWindow = name;
+            states[name].showContextMenu = true;
+        }
+        for (auto re : releaseRightEvents) {
+            sRButton = false;
+            auto [name, vp] = windowAt(layout, re->position());
+            if (name.empty() || !states.count(name)) continue;
+            dispatchMouse(name, vp, states, EVENT_RBUTTONUP, re->position(), heldButtonFlags());
         }
 
-        // Middle-click: jump to deep zoom in the window under cursor.
+        // Middle-click: deliver EVENT_MBUTTONDOWN, then jump to deep zoom.
         for (auto me : pressMiddleEvents) {
             auto [name, vp] = windowAt(layout, me->position());
             if (name.empty() || !states.count(name)) continue;
+            sMButton = true;
+            dispatchMouse(name, vp, states, EVENT_MBUTTONDOWN, me->position(), heldButtonFlags());
             zoomRegion(states[name], vp.size());
             activeWindow = name;
+        }
+        for (auto me : releaseMiddleEvents) {
+            sMButton = false;
+            auto [name, vp] = windowAt(layout, me->position());
+            if (name.empty() || !states.count(name)) continue;
+            dispatchMouse(name, vp, states, EVENT_MBUTTONUP, me->position(), heldButtonFlags());
+        }
+
+        // Double-clicks.
+        for (auto de : doubleClickLeftEvents) {
+            auto [name, vp] = windowAt(layout, de->position());
+            if (name.empty() || !states.count(name)) continue;
+            dispatchMouse(name, vp, states, EVENT_LBUTTONDBLCLK, de->position(), heldButtonFlags());
+        }
+        for (auto de : doubleClickRightEvents) {
+            auto [name, vp] = windowAt(layout, de->position());
+            if (name.empty() || !states.count(name)) continue;
+            dispatchMouse(name, vp, states, EVENT_RBUTTONDBLCLK, de->position(), heldButtonFlags());
+        }
+        for (auto de : doubleClickMiddleEvents) {
+            auto [name, vp] = windowAt(layout, de->position());
+            if (name.empty() || !states.count(name)) continue;
+            dispatchMouse(name, vp, states, EVENT_MBUTTONDBLCLK, de->position(), heldButtonFlags());
         }
 
         // Cursor position per window (for the status bar / pixel readout).
@@ -427,6 +582,8 @@ private:
                 if (vp.contains(me->position())) {
                     it->second.mouseInside = true;
                     it->second.mousePos = toLocal(vp, me->position());
+                    dispatchMouse(name, vp, states, EVENT_MOUSEMOVE,
+                                  me->position(), heldButtonFlags());
                 } else {
                     it->second.mouseInside = false;
                 }
@@ -438,6 +595,43 @@ private:
                 st.mousePos = {-1.0f, -1.0f};
             }
         }
+    }
+
+    // Combines the currently held mouse buttons and modifier keys into the
+    // EVENT_FLAG_* bitmask handed to mouse callbacks (worker thread only).
+    static int heldButtonFlags() {
+        int flags = 0;
+        if (sLButton) flags |= EVENT_FLAG_LBUTTON;
+        if (sRButton) flags |= EVENT_FLAG_RBUTTON;
+        if (sMButton) flags |= EVENT_FLAG_MBUTTON;
+        if (sKeyShift) flags |= EVENT_FLAG_SHIFTKEY;
+        if (sKeyCtrl)  flags |= EVENT_FLAG_CTRLKEY;
+        if (sKeyAlt)   flags |= EVENT_FLAG_ALTKEY;
+        return flags;
+    }
+
+    // Invokes the window's mouse callback (if any) with the event mapped to
+    // image-pixel coordinates, matching the status-bar readout transform.
+    static void dispatchMouse(const std::string& name, const cv::Rect& vp,
+                              std::map<std::string, ViewState>& states,
+                              int event, const cv::Point& pos, int flags) {
+        auto it = states.find(name);
+        if (it == states.end()) return;
+        auto wd = WindowManager::instance().getWindowShared(name);
+        if (!wd) return;
+        MouseCallback cb = nullptr;
+        void* ud = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(wd->sink->mtx);
+            cb = wd->mouseCb;
+            ud = wd->mouseUserdata;
+        }
+        if (!cb) return;
+        const ViewState& st = it->second;
+        float invZ = 1.0f / st.zoom;
+        int ix = (int)std::floor((pos.x - vp.x - st.pan.x) * invZ);
+        int iy = (int)std::floor((pos.y - vp.y - st.pan.y) * invZ);
+        cb(event, ix, iy, flags, ud);
     }
 
     // ---------- View helpers ------------------------------------------------
@@ -485,6 +679,9 @@ private:
         std::uint64_t startGen = WindowManager::instance().generation();
         std::vector<std::string> names = WindowManager::instance().getWindowNames();
 
+        s_winW.store(sz.width);
+        s_winH.store(sz.height);
+
         // Release NanoVG textures of windows removed since the last frame.
         // reconcileStates queued the handles; they are only deleted here while
         // the nvg context is current and the previous frame's batch is flushed.
@@ -497,6 +694,7 @@ private:
             // can be satisfied with an empty/cleared framebuffer.
             s_frameDrawStartGen.store(startGen);
             s_frameDrawEndGen.store(startGen);
+            notifySettledFrame(startGen);
             return;
         }
 
@@ -513,18 +711,42 @@ private:
             if (!wd) continue;
             std::string title;
             {
-                std::lock_guard<std::mutex> lock(wd->sink.mtx);
+                std::lock_guard<std::mutex> lock(wd->sink->mtx);
                 title = wd->title;
             }
-            cv::UMat img = wd->sink.frame();
-            if (img.empty()) continue;
+            const std::uint64_t serial = wd->contentSerial.load(std::memory_order_relaxed);
+
+            // Unchanged content already uploaded: re-render from the existing
+            // texture / BGRA copy instead of re-encoding and re-uploading.
+            if (st.imageHandle > 0 && serial == st.uploadedSerial) {
+                renderWindowContent(st, vp, verbose, title);
+                continue;
+            }
+            // Content already rejected as unsupported: skip until it changes.
+            if (serial == st.badSerial || serial == ViewState::kNeverUploaded) {
+                continue;
+            }
+
+            cv::UMat img = wd->sink->frame();
+            if (img.empty()) {
+                st.badSerial = serial;
+                continue;
+            }
 
             cv::UMat rgba8;
-            if (!prepareRgba(img, rgba8)) {
-                // One bad window must not kill the shared render engine: skip it
-                // and let the caller see the warning instead.
+            try {
+                if (!prepareRgba(img, rgba8)) {
+                    // One bad window must not kill the shared render engine: skip
+                    // it and let the caller see the warning instead.
+                    st.badSerial = serial;
+                    CV_LOG_WARNING(nullptr, "lowgui: skipping window '" << name
+                        << "' with unsupported image format for imshow");
+                    continue;
+                }
+            } catch (const std::exception& ex) {
+                st.badSerial = serial;
                 CV_LOG_WARNING(nullptr, "lowgui: skipping window '" << name
-                    << "' with unsupported image format for imshow");
+                    << "' with unrenderable image: " << ex.what());
                 continue;
             }
 
@@ -552,23 +774,34 @@ private:
             if (handle <= 0) continue;
             st.imageHandle = handle;
             st.rgbaCopy = hostCopy;
+            st.uploadedSerial = serial;
+            st.badSerial = ViewState::kNeverUploaded;
 
-            save();
-            scissor(vp.x, vp.y, vp.width, vp.height);
-            translate((float)vp.x, (float)vp.y);
-            renderImage(st, vp.size(), verbose);
-            restore();
-            if (verbose && st.showStatusBar) {
-                save();
-                scissor(vp.x, vp.y, vp.width, vp.height);
-                translate((float)vp.x, (float)vp.y);
-                renderStatusBar(st, vp.size(), title);
-                restore();
-            }
+            renderWindowContent(st, vp, verbose, title);
         }
 
         s_frameDrawEndGen.store(WindowManager::instance().generation());
         s_frameDrawStartGen.store(startGen);
+        if (s_frameDrawStartGen.load() == s_frameDrawEndGen.load()) {
+            notifySettledFrame(s_frameDrawEndGen.load());
+        }
+    }
+
+    static void renderWindowContent(ViewState& st, const cv::Rect& vp,
+                                    bool verbose, const std::string& title) {
+        using namespace cv::v4d::nvg;
+        save();
+        scissor(vp.x, vp.y, vp.width, vp.height);
+        translate((float)vp.x, (float)vp.y);
+        renderImage(st, vp.size(), verbose);
+        restore();
+        if (verbose && st.showStatusBar) {
+            save();
+            scissor(vp.x, vp.y, vp.width, vp.height);
+            translate((float)vp.x, (float)vp.y);
+            renderStatusBar(st, vp.size(), title);
+            restore();
+        }
     }
 
     static void renderImage(ViewState& st, const cv::Size& cell, bool verbose) {
@@ -748,7 +981,9 @@ private:
     }
 
     // Mirrors highgui's imshow depth handling: 8S +128, 16U>>8, 16S(+128)>>8,
-    // 32F/64F * 255 (saturated). 32S is rejected like highgui does.
+    // 32F/64F * 255 (saturated). 32S is rejected like highgui does. Only 1/3/4
+    // channels are renderable; anything else is rejected up front so the shared
+    // render engine is never torn down by cvtColor throwing on an unknown code.
     static bool prepareRgba(const cv::UMat& src, cv::UMat& rgba8) {
         if (src.depth() != CV_8U) {
             double alpha = 1.0, beta = 0.0;
@@ -763,11 +998,17 @@ private:
             cv::UMat u8;
             src.convertTo(u8, CV_8U, alpha, beta);
             cv::Mat cpu = u8.getMat(cv::ACCESS_READ);
-            cv::cvtColor(cpu, rgba8, colorCode(cpu.channels()));
+            return convertToRgba(cpu, rgba8);
         } else {
             cv::Mat cpu = src.getMat(cv::ACCESS_READ);
-            cv::cvtColor(cpu, rgba8, colorCode(cpu.channels()));
+            return convertToRgba(cpu, rgba8);
         }
+    }
+
+    static bool convertToRgba(const cv::Mat& cpu, cv::UMat& rgba8) {
+        int code = colorCode(cpu.channels());
+        if (code < 0) return false;
+        cv::cvtColor(cpu, rgba8, code);
         return !rgba8.empty();
     }
 
@@ -781,6 +1022,41 @@ private:
     }
 
     // ---------- ImGui helpers ----------------------------------------------
+
+    // Qt's 11-actions context menu is disabled for GUI_NORMAL windows (and the
+    // menu bar / help overlay / status bar too, see step 7).
+    static bool windowGuiNormal(const std::string& name) {
+        auto wd = WindowManager::instance().getWindowShared(name);
+        if (!wd) return false;
+        // `flags` is set at WindowData construction and never mutated, so no
+        // lock is required to read it safely here.
+        return (wd->flags & WINDOW_GUI_NORMAL) != 0;
+    }
+
+    // Best-effort copy of the window's current source image to the X clipboard
+    // via xclip on Linux. Shared by the Ctrl+C shortcut and the context menu
+    // so they stay identical.
+    static void copyWindowToClipboard(ViewState& st, const std::string& winname) {
+        auto wd = WindowManager::instance().getWindowShared(winname);
+        cv::UMat um;
+        if (wd) um = wd->sink->frame();
+        if (um.empty()) return;
+        cv::Mat src = um.getMat(cv::ACCESS_READ);
+        std::string tmp = "/tmp/lowgui_clipboard_" + std::to_string(::getpid()) + ".png";
+        if (imwrite(tmp, src)) {
+            std::string cmd = "xclip -selection clipboard -t image/png < \"" + tmp + "\"";
+            FILE* p = popen(cmd.c_str(), "r");
+            if (p) {
+                pclose(p);
+                st.lastImageSaveOk = true;
+                st.lastImageSaveMsg = "Copied image to clipboard.";
+            } else {
+                st.lastImageSaveOk = false;
+                st.lastImageSaveMsg = "Failed to copy image to clipboard (xclip missing?).";
+            }
+            std::remove(tmp.c_str());
+        }
+    }
 
     static bool isImageFile(const std::string& name) {
         std::error_code ec;
@@ -798,11 +1074,19 @@ private:
 
     static void refreshFileDialogEntries(ViewState& st) {
         st.fileDialogEntries.clear();
+        st.fileDialogErrorMsg.clear();
         std::error_code ec;
         std::filesystem::path dir(st.fileDialogPath);
-        if (!std::filesystem::is_directory(dir, ec)) return;
+        if (!std::filesystem::is_directory(dir, ec)) {
+            st.fileDialogErrorMsg = ec ? ec.message()
+                                       : ("Not a directory: " + std::string(st.fileDialogPath));
+            return;
+        }
         for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-            if (ec) break;
+            if (ec) {
+                st.fileDialogErrorMsg = ec.message();
+                break;
+            }
             std::string name = entry.path().filename().string();
             if (entry.is_directory(ec)) {
                 st.fileDialogEntries.emplace_back(name, true);
@@ -882,21 +1166,8 @@ private:
             }
             if (IsKeyPressed(ImGuiKey_C)) {
                 // Copy the source image of the active window to clipboard via
-                // xclip on Linux. Best-effort, no GUI feedback.
-                auto wd = WindowManager::instance().getWindowShared(activeWindow);
-                cv::UMat um;
-                if (wd) um = wd->sink.frame();
-                if (!um.empty()) {
-                    cv::Mat src = um.getMat(cv::ACCESS_READ);
-                    std::string tmp = "/tmp/lowgui_clipboard.png";
-                    if (imwrite(tmp, src)) {
-                        std::string cmd = "xclip -selection clipboard -t image/png < "
-                                          + tmp + " >/dev/null 2>&1 &";
-                        std::system(cmd.c_str());
-                        st.lastImageSaveOk = true;
-                        st.lastImageSaveMsg = "Copied image to clipboard.";
-                    }
-                }
+                // xclip on Linux (shared with the context menu).
+                copyWindowToClipboard(st, activeWindow);
             }
         }
 
@@ -906,6 +1177,7 @@ private:
             else if (st.showSaveDialog)    st.showSaveDialog         = false;
             else if (st.showSaveViewDialog)st.showSaveViewDialog     = false;
             else if (st.showFileDialog)    st.showFileDialog         = false;
+            else if (st.showControlPanel)  st.showControlPanel       = false;
             else if (st.showHelp)          st.showHelp               = false;
         }
 
@@ -960,6 +1232,42 @@ private:
             EndMainMenuBar();
         }
 
+        // ---------- Right-click context menu (Qt parity) ----------
+        // The worker queues showContextMenu on right-click and sets
+        // activeWindow. Consume it every frame regardless so it never lingers;
+        // GUI_NORMAL windows get no context menu (Qt same).
+        if (st.showContextMenu) {
+            st.showContextMenu = false;
+            if (!windowGuiNormal(activeWindow)) {
+                OpenPopup("lowgui_context_menu");
+            }
+        }
+        if (BeginPopup("lowgui_context_menu")) {
+            if (MenuItem("Panning left",    "Ctrl+Left"))  panFrac( 0.05f, 0.0f);
+            if (MenuItem("Panning right",   "Ctrl+Right")) panFrac(-0.05f, 0.0f);
+            if (MenuItem("Panning up",      "Ctrl+Up"))    panFrac(0.0f,  0.05f);
+            if (MenuItem("Panning down",    "Ctrl+Down"))  panFrac(0.0f, -0.05f);
+            Separator();
+            if (MenuItem("Zoom x1",              "Ctrl+0"))  resetZoom(st, vp.size());
+            if (MenuItem("Zoom x30 (deep zoom)", "Ctrl+X"))  zoomRegion(st, vp.size());
+            if (MenuItem("Zoom in",              "Ctrl++"))  zoomAround(st, vp.size(), 1.5f);
+            if (MenuItem("Zoom out",             "Ctrl+-"))  zoomAround(st, vp.size(), 1.0f / 1.5f);
+            Separator();
+            if (MenuItem("Save image...", "Ctrl+S")) {
+                std::snprintf(st.saveBuf, sizeof(st.saveBuf), "%s", st.label.c_str());
+                st.showSaveDialog = true;
+            }
+            if (MenuItem("Copy image to clipboard", "Ctrl+C")) {
+                copyWindowToClipboard(st, activeWindow);
+            }
+            Separator();
+            bool panelContent = WindowManager::instance().hasControlPanelContent();
+            if (MenuItem("Display properties window", "Ctrl+P", false, panelContent)) {
+                st.showControlPanel = true;
+            }
+            EndPopup();
+        }
+
         // ---------- File browser dialog (Open image...) ----------
         if (st.showFileDialog) {
             SetNextWindowSize(ImVec2(560, 420), ImGuiCond_Appearing);
@@ -969,10 +1277,10 @@ private:
             if (!st.fileDialogErrorMsg.empty()) {
                 TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
                             "Error: %s", st.fileDialogErrorMsg.c_str());
-                if (Button("Clear error")) st.fileDialogErrorMsg.clear();
+                if (ImGui::Button("Clear error")) st.fileDialogErrorMsg.clear();
                 SameLine();
             }
-            if (Button("Up")) {
+            if (ImGui::Button("Up")) {
                 std::error_code ec;
                 std::filesystem::path p(st.fileDialogPath);
                 if (p.has_parent_path()) {
@@ -1029,7 +1337,7 @@ private:
             SetItemDefaultFocus();
             if (IsWindowAppearing()) SetKeyboardFocusHere(-1);
 
-            if (Button("Open") && st.fileDialogSelected[0] != '\0') {
+            if (ImGui::Button("Open") && st.fileDialogSelected[0] != '\0') {
                 std::error_code ec;
                 std::filesystem::path sel(st.fileDialogSelected);
                 std::filesystem::path full = std::filesystem::path(st.fileDialogPath) / sel;
@@ -1045,7 +1353,7 @@ private:
                 }
             }
             SameLine();
-            if (Button("Cancel")) {
+            if (ImGui::Button("Cancel")) {
                 st.showFileDialog = false;
             }
             End();
@@ -1065,7 +1373,7 @@ private:
                 else                    TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
                                                     "%s", st.lastImageSaveMsg.c_str());
             }
-            if (Button("Save") && st.saveBuf[0] != '\0') {
+            if (ImGui::Button("Save") && st.saveBuf[0] != '\0') {
                 std::string path(st.saveBuf);
                 std::string ext = fmts[std::clamp(st.saveFormat, 0, 2)];
                 if (path.size() < ext.size() ||
@@ -1074,7 +1382,7 @@ private:
                 }
                 auto wd = WindowManager::instance().getWindowShared(activeWindow);
                 cv::UMat um;
-                if (wd) um = wd->sink.frame();
+                if (wd) um = wd->sink->frame();
                 if (um.empty()) {
                     st.lastImageSaveOk = false;
                     st.lastImageSaveMsg = "No image to save";
@@ -1092,7 +1400,7 @@ private:
                 }
             }
             SameLine();
-            if (Button("Cancel")) {
+            if (ImGui::Button("Cancel")) {
                 st.showSaveDialog = false;
                 st.lastImageSaveMsg.clear();
             }
@@ -1113,7 +1421,7 @@ private:
                 else                   TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
                                                    "%s", st.lastViewSaveMsg.c_str());
             }
-            if (Button("Save") && st.saveBuf[0] != '\0') {
+            if (ImGui::Button("Save") && st.saveBuf[0] != '\0') {
                 std::string path(st.saveBuf);
                 std::string ext = fmts[std::clamp(st.saveFormat, 0, 2)];
                 if (path.size() < ext.size() ||
@@ -1124,7 +1432,7 @@ private:
                 // source image of the active window for a predictable result.
                 auto wd = WindowManager::instance().getWindowShared(activeWindow);
                 cv::UMat um;
-                if (wd) um = wd->sink.frame();
+                if (wd) um = wd->sink->frame();
                 if (um.empty()) {
                     st.lastViewSaveOk = false;
                     st.lastViewSaveMsg = "No image to save";
@@ -1142,7 +1450,7 @@ private:
                 }
             }
             SameLine();
-            if (Button("Cancel")) {
+            if (ImGui::Button("Cancel")) {
                 st.showSaveViewDialog = false;
                 st.lastViewSaveMsg.clear();
             }
@@ -1264,6 +1572,19 @@ private:
         cv::flip(rgba, s_framebuffer, 0);
     }
 };
+
+cv::Rect LowguiRootPlan::viewportFor(const std::string& name, const cv::Size& sz) {
+    for (const auto& e : computeLayout(sz)) {
+        if (e.first == name) return e.second;
+    }
+    return cv::Rect();
+}
+
+void LowguiRootPlan::notifySettledFrame(std::uint64_t gen) {
+    s_frameDrawDoneGen.store(gen);
+    std::lock_guard<std::mutex> lock(s_frameDrawMtx);
+    s_frameDrawCv.notify_all();
+}
 
 } // namespace detail
 } // namespace lowgui

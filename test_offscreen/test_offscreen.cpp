@@ -80,5 +80,44 @@ TEST_F(OffscreenRenderingTest, readFramebuffer_returns_empty_without_headless) {
     EXPECT_TRUE(fb.empty());
 }
 
+TEST_F(OffscreenRenderingTest, unsupported_channel_count_does_not_kill_engine) {
+    setenv("LOWGUI_HEADLESS_RENDER", "1", 1);
+    Lowgui::namedWindow("c2_win");
+    cv::Mat two(32, 32, CV_8UC2);
+    two.setTo(0);
+    Lowgui::imshow("c2_win", two);
+
+    cv::Mat red = cv::Mat::zeros(960, 960, CV_8UC3);
+    red.setTo(cv::Scalar(0, 0, 255));
+    Lowgui::imshow("c2_win", red);
+    Lowgui::waitKey(0);
+
+    cv::UMat fb = Lowgui::readFramebuffer();
+    ASSERT_FALSE(fb.empty());
+    EXPECT_EQ(fb.cols, 960);
+    EXPECT_EQ(fb.rows, 960);
+
+    cv::Mat expected(960, 960, CV_8UC4, cv::Scalar(255, 0, 0, 255));
+    EXPECT_LT(cv::norm(fb, expected, cv::NORM_INF), 3);
+}
+
+TEST_F(OffscreenRenderingTest, unsupported_depth_does_not_kill_engine) {
+    setenv("LOWGUI_HEADLESS_RENDER", "1", 1);
+    Lowgui::namedWindow("s32_win");
+    cv::Mat s32(32, 32, CV_32SC1);
+    s32.setTo(1);
+    Lowgui::imshow("s32_win", s32);
+
+    cv::Mat blue = cv::Mat::zeros(960, 960, CV_8UC3);
+    blue.setTo(cv::Scalar(255, 0, 0));
+    Lowgui::imshow("s32_win", blue);
+    Lowgui::waitKey(0);
+
+    cv::UMat fb = Lowgui::readFramebuffer();
+    ASSERT_FALSE(fb.empty());
+    cv::Mat expected(960, 960, CV_8UC4, cv::Scalar(0, 0, 255, 255));
+    EXPECT_LT(cv::norm(fb, expected, cv::NORM_INF), 3);
+}
+
 }
 } // namespace opencv_test

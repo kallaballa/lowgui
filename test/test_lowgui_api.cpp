@@ -1,6 +1,6 @@
 #include "test_precomp.hpp"
 #include <opencv2/lowgui/lowgui.hpp>
-#include <opencv2/lowgui/lowgui_root_plan.hpp>
+#include "lowgui_root_plan.hpp"
 #include <thread>
 #include <chrono>
 

@@ -56,13 +56,13 @@ TEST_F(WindowManagerTest, destroyAllWindows_clears_all) {
 
 TEST_F(WindowManagerTest, getWindow_returns_valid_pointer) {
     WindowManager::instance().createWindow("win1", 0);
-    WindowData* wd = WindowManager::instance().getWindow("win1");
+    auto wd = WindowManager::instance().getWindowShared("win1");
     ASSERT_NE(wd, nullptr);
     EXPECT_EQ(wd->name, "win1");
 }
 
 TEST_F(WindowManagerTest, getWindow_returns_nullptr_for_missing) {
-    EXPECT_EQ(WindowManager::instance().getWindow("nonexistent"), nullptr);
+    EXPECT_EQ(WindowManager::instance().getWindowShared("nonexistent"), nullptr);
 }
 
 TEST_F(WindowManagerTest, getWindowNames_returns_all_names) {
@@ -146,7 +146,7 @@ TEST_F(WindowManagerTest, pushImage_thread_safety) {
             for (int i = 0; i < kIterations; ++i) {
                 cv::UMat umat(4, 4, CV_8UC1);
                 umat.setTo(t * 10 + i);
-		WindowManager::instance().pushImage("win1", umat);
+                WindowManager::instance().pushImage("win1", umat);
             }
         });
     }
@@ -163,7 +163,7 @@ TEST_F(WindowManagerTest, pushImage_thread_safety) {
 TEST_F(WindowManagerTest, getWindow_const_overload) {
     WindowManager::instance().createWindow("win1", 0);
     const WindowManager& wm = WindowManager::instance();
-    const WindowData* wd = wm.getWindow("win1");
+    auto wd = wm.getWindowShared("win1");
     ASSERT_NE(wd, nullptr);
     EXPECT_EQ(wd->name, "win1");
 }
