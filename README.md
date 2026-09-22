@@ -180,10 +180,8 @@ scripts change.
 ```cpp
 #include <opencv2/lowgui/lowgui.hpp>
 #include <opencv2/imgcodecs.hpp>
-
-static void onMouse(int event, int x, int y, int flags, void*) {
-    // See EVENT_* / EVENT_FLAG_* in lowgui.hpp (Qt-compatible).
-}
+#include <opencv2/core/utility.hpp>
+#include <iostream>
 
 int main(int argc, char** argv) {
     std::string imgFile = argc > 1 ? argv[1] : cv::samples::findFile("lena.png");
@@ -191,7 +189,6 @@ int main(int argc, char** argv) {
     if (img.empty()) return 1;
 
     cv::lowgui::Lowgui::namedWindow("demo");
-    cv::lowgui::Lowgui::setMouseCallback("demo", onMouse);
     cv::lowgui::Lowgui::imshow("demo", img);
     std::cout << "Arrow keys pan, +/- zoom, Esc closes, Ctrl+S saves.\n";
     cv::lowgui::Lowgui::waitKey(0);

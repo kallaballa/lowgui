@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 lowgui contributors
+// Clean-room reimplementation of OpenCV highgui (see README.md).
 #include <opencv2/lowgui/window_manager.hpp>
 #include <vector>
 #include <algorithm>
@@ -18,6 +21,7 @@ void WindowManager::createWindow(const std::string& name, int flags) {
         windows_.emplace(name, std::make_shared<WindowData>(name, name, flags));
         windowOrder_.push_back(name);
         generation_.fetch_add(1, std::memory_order_relaxed);
+        cv_.notify_all();
     }
 }
 
@@ -33,6 +37,12 @@ void WindowManager::destroyAllWindows() {
     std::lock_guard<std::mutex> lock(mtx_);
     windows_.clear();
     windowOrder_.clear();
+    // Control-panel trackbars/buttons are process-global (registry is not tied
+    // to a window): clear them too so teardown is complete and createButton /
+    // createTrackbar after destroyAllWindows start from a clean registry.
+    controlTrackbars_.clear();
+    controlButtons_.clear();
+    nextBarId_ = 0;
     generation_.fetch_add(1, std::memory_order_relaxed);
     cv_.notify_all();
 }
@@ -43,11 +53,13 @@ bool WindowManager::hasWindow(const std::string& name) const {
 }
 
 void WindowManager::pushImage(const std::string& name, const cv::UMat& img) {
-    std::unique_lock<std::mutex> lock(mtx_);
-    auto it = windows_.find(name);
-    if (it == windows_.end()) return;
-    it->second->sink->push(img);
-    it->second->contentSerial.fetch_add(1, std::memory_order_relaxed);
+    // Hold the window map lock only long enough to pin the WindowData. The
+    // actual CPU(/GPU) copy inside sink->push is guarded by sink->mtx, so a
+    // large imshow never stalls unrelated window operations on mtx_.
+    std::shared_ptr<WindowData> wd = getWindowShared(name);
+    if (!wd) return;
+    wd->sink->push(img);
+    wd->contentSerial.fetch_add(1, std::memory_order_relaxed);
     generation_.fetch_add(1, std::memory_order_relaxed);
 }
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 lowgui contributors
+// Clean-room reimplementation of OpenCV highgui (see README.md).
 #include <opencv2/lowgui/lowgui.hpp>
 #include <opencv2/lowgui/window_manager.hpp>
 #include "lowgui_input.hpp"
@@ -137,6 +140,11 @@ namespace {
 int waitKeyImpl(int delay, bool lowByte) {
     static const int kCaptureTimeoutMs = 10000;
 
+    // Load-bearing early return (L7): the main-unit binary runs its waitKey API
+    // tests with zero windows so waitKey never starts the real-display engine
+    // (which would need a display server and would hang waitKey(0)). Do NOT
+    // remove; the offscreen binary (opencv_test_lowgui_offscreen) exercises the
+    // windowed paths. CI additionally wraps the binaries in `timeout 300s`.
     if (WindowManager::instance().windowCount() == 0) {
         if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         return -1;
@@ -145,6 +153,15 @@ int waitKeyImpl(int delay, bool lowByte) {
     startEngine(shouldRenderOffscreen());
 
     if (!gEngineLoopAlive.load()) {
+        // One-shot V4D engine (M5): after engine death waitKey* returns -1
+        // immediately. Warn once on the first post-death call so callers that
+        // keep pumping events see an explanation instead of silent -1 speeds.
+        static bool warnedPostDeath = false;
+        if (!warnedPostDeath) {
+            warnedPostDeath = true;
+            CV_LOG_WARNING(nullptr, "lowgui: render engine has terminated; a window "
+                "close ends the render loop permanently, waitKey* returns -1.");
+        }
         if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         return -1;
     }
@@ -152,20 +169,27 @@ int waitKeyImpl(int delay, bool lowByte) {
     const bool headlessCapture = std::getenv("LOWGUI_HEADLESS_RENDER") != nullptr;
 
     if (gEngineModeOffscreen.load()) {
-        // Headless/offscreen (LOWGUI_HEADLESS_RENDER / LOWGUI_FORCE_OFFSCREEN /
-        // no display): keep the capture sequencing, then drain any key that was
-        // injected through gwe::push. No injected key means -1. Mirror the
-        // real-display branch and clear any stale capture from earlier runs so
-        // readFramebuffer() reflects only what this waitKey produced.
+        // Offscreen (LOWGUI_HEADLESS_RENDER / LOWGUI_FORCE_OFFSCREEN / no display):
+        // drain the key queue FIRST, independent of the capture wait (M7). A
+        // sustained image stream churns the generation so a settled capture may
+        // not arrive within the timeout; that must never hold up key delivery.
+        // Only when no key is pending do we run the capture sequencing (so the
+        // tests' imshow -> waitKey(0) -> readFramebuffer contract still holds).
         LowguiRootPlan::clearFramebuffer();
+        int code = cv::lowgui::detail::keyQueue().poll();
+        if (code >= 0) return lowByte ? (code & 0xff) : code;
         if (headlessCapture) {
             long id = LowguiRootPlan::requestFrameCapture(WindowManager::instance().generation());
             if (!LowguiRootPlan::waitForFrameCapture(id, kCaptureTimeoutMs)) {
-                CV_LOG_WARNING(nullptr, "lowgui: timed out waiting for framebuffer capture");
+                // Only the blocking caller (waitKey(0)) needs to know: a timed
+                // poll under capture churn would otherwise spam the warning.
+                if (delay == 0) {
+                    CV_LOG_WARNING(nullptr, "lowgui: timed out waiting for framebuffer capture");
+                }
             }
         }
         if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-        int code = cv::lowgui::detail::keyQueue().poll();
+        code = cv::lowgui::detail::keyQueue().poll();
         if (code < 0) return -1;
         return lowByte ? (code & 0xff) : code;
     }
@@ -284,13 +308,10 @@ int Lowgui::createButton(const std::string& bar_name, ButtonCallback on_change,
 }
 
 void Lowgui::setWindowProperty(const std::string& winname, int prop_id, int prop_value) {
+    // FULLSCREEN is applied by the render worker reading wd->propFullscreen and
+    // writing V4D::Keys::FULLSCREEN on every frame (whole native window), so no
+    // extra settled-frame notify is needed here.
     WindowManager::instance().setProperty(winname, prop_id, prop_value);
-    if (prop_id == WND_PROP_FULLSCREEN) {
-        // The root plan writes V4D::Keys::FULLSCREEN from the stored property on
-        // every frame (whole native window). Notify the settled-frame waiters so
-        // a subsequent waitKey(0) presents the new fullscreen state.
-        LowguiRootPlan::notifySettledFrame(WindowManager::instance().generation());
-    }
 }
 
 double Lowgui::getWindowProperty(const std::string& winname, int prop_id) {

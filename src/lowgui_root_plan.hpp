@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 lowgui contributors
+// Clean-room reimplementation of OpenCV highgui (see README.md).
 #ifndef OPENCV_LOWGUI_LOWGUI_ROOT_PLAN_HPP_
 #define OPENCV_LOWGUI_LOWGUI_ROOT_PLAN_HPP_
 
@@ -73,6 +76,15 @@ public:
         float zoom = 1.0f;
         cv::Point2f pan = {0.0f, 0.0f};
         bool isDragging = false;
+        // ASPECT_RATIO parity (mirrors wd->propKeepRatio): KEEPRATIO letterboxes
+        // with a uniform scale (fitToCell); FREERATIO stretches to fill the cell.
+        // Deep-zoom / pixel-grid overlays only make sense under KEEPRATIO.
+        bool keepRatio = true;
+
+        // Transient displayOverlay/displayStatusBar content, refreshed every
+        // frame from wd->statusMsg / wd->overlayMsg under wd->sink->mtx.
+        std::string statusText;
+        std::string overlayText;
 
         // Cursor tracking (viewport-local)
         cv::Point2f mousePos = {-1.0f, -1.0f};
@@ -131,6 +143,10 @@ private:
     // NanoVG image handles to freed in the next nvg node (collected by
     // reconcileStates when a window disappears). Worker thread only.
     std::vector<int> orphanedTextures_;
+
+    // Last FULLSCREEN value written to V4D (worker thread only); used to fire
+    // the framebuffer resize callback only on transitions.
+    bool lastFullscreen_ = false;
 
     static cv::UMat s_framebuffer;
     static std::mutex s_fbMutex;
@@ -325,7 +341,19 @@ private:
     // ---------- Layout ------------------------------------------------------
 
     static std::vector<std::pair<std::string, cv::Rect>> computeLayout(const cv::Size& sz) {
-        std::vector<std::string> names = WindowManager::instance().getWindowNames();
+        std::vector<std::string> names;
+        for (const std::string& n : WindowManager::instance().getWindowNames()) {
+            auto wd = WindowManager::instance().getWindowShared(n);
+            if (!wd) continue;
+            bool visible = true;
+            {
+                std::lock_guard<std::mutex> lock(wd->sink->mtx);
+                visible = wd->propVisible != 0;
+            }
+            // WND_PROP_VISIBLE == 0 hides the cell entirely (no grid slot, no
+            // mouse hit, empty getWindowImageRect) — parity with Qt.
+            if (visible) names.push_back(n);
+        }
         std::vector<std::pair<std::string, cv::Rect>> layout;
         layout.reserve(names.size());
         int n = (int)names.size();
@@ -339,8 +367,24 @@ private:
             cv::Rect vp = cell;
             auto wd = WindowManager::instance().getWindowShared(names[i]);
             if (wd) {
-                std::lock_guard<std::mutex> lock(wd->sink->mtx);
-                vp = wd->userViewport ? wd->viewport : cell;
+                int autosize = 0;
+                bool userViewport;
+                {
+                    std::lock_guard<std::mutex> lock(wd->sink->mtx);
+                    userViewport = wd->userViewport;
+                    autosize = wd->propAutosize;
+                }
+                if (userViewport) {
+                    std::lock_guard<std::mutex> lock(wd->sink->mtx);
+                    vp = wd->viewport;
+                } else if (autosize && wd->imageW > 0 && wd->imageH > 0) {
+                    // WINDOW_AUTOSIZE: the cell is sized to the image, clamped
+                    // to the grid slot and centered within it (Qt parity).
+                    int iw = std::min((int)wd->imageW.load(), cell.width);
+                    int ih = std::min((int)wd->imageH.load(), cell.height);
+                    vp = cv::Rect(cell.x + (cell.width - iw) / 2,
+                                  cell.y + (cell.height - ih) / 2, iw, ih);
+                }
             }
             layout.emplace_back(names[i], vp);
         }
@@ -671,6 +715,15 @@ private:
         st.pan.y = (cell.height - st.imageH * st.zoom) * 0.5f;
     }
 
+    // WINDOW_FREERATIO: non-uniform stretch-fill. The letterbox reset comes from
+    // renderImage scaling by cell/image per axis at zoom 1, so pan must be 0.
+    static void fitStretch(ViewState& st, const cv::Size& cell) {
+        if (st.imageW <= 0 || st.imageH <= 0) return;
+        st.zoom = 1.0f;
+        st.pan.x = 0.0f;
+        st.pan.y = 0.0f;
+    }
+
     // ---------- Rendering ---------------------------------------------------
 
     void drawWindows(const cv::Size& sz, std::map<std::string, ViewState>& states) {
@@ -681,6 +734,11 @@ private:
 
         s_winW.store(sz.width);
         s_winH.store(sz.height);
+
+        // FULLSCREEN is a whole-native-window property: if any visible window
+        // wants it, apply it. Guarded by the last-set value so setFullscreen is
+        // only invoked on an actual transition, not every frame.
+        bool fullscreenWanted = false;
 
         // Release NanoVG textures of windows removed since the last frame.
         // reconcileStates queued the handles; they are only deleted here while
@@ -710,10 +768,16 @@ private:
             auto wd = WindowManager::instance().getWindowShared(name);
             if (!wd) continue;
             std::string title;
+            bool winFullscreen = false;
             {
                 std::lock_guard<std::mutex> lock(wd->sink->mtx);
                 title = wd->title;
+                st.keepRatio = (wd->propKeepRatio != 0);
+                st.statusText = wd->statusMsg.active() ? wd->statusMsg.text : std::string();
+                st.overlayText = wd->overlayMsg.active() ? wd->overlayMsg.text : std::string();
+                winFullscreen = wd->propFullscreen != 0;
             }
+            fullscreenWanted = fullscreenWanted || winFullscreen;
             const std::uint64_t serial = wd->contentSerial.load(std::memory_order_relaxed);
 
             // Unchanged content already uploaded: re-render from the existing
@@ -760,7 +824,8 @@ private:
                 st.imageW = rgba8.cols;
                 st.imageH = rgba8.rows;
                 st.channels = origCh;
-                fitToCell(st, vp.size());
+                if (st.keepRatio) fitToCell(st, vp.size());
+                else fitStretch(st, vp.size());
             }
 
             // Delete the previous frame's handle (its batch was flushed at the
@@ -778,6 +843,15 @@ private:
             st.badSerial = ViewState::kNeverUploaded;
 
             renderWindowContent(st, vp, verbose, title);
+        }
+
+        // Apply FULLSCREEN on the worker (nvg node) thread only on a
+        // transition. V4D::set is the direct property setter (not the
+        // infer()-only transactional `set`); it triggers the framebuffer
+        // resize callback registered for the key.
+        if (fullscreenWanted != lastFullscreen_) {
+            lastFullscreen_ = fullscreenWanted;
+            V4D::set(V4D::Keys::FULLSCREEN, fullscreenWanted);
         }
 
         s_frameDrawEndGen.store(WindowManager::instance().generation());
@@ -802,6 +876,30 @@ private:
             renderStatusBar(st, vp.size(), title);
             restore();
         }
+        // Transient displayOverlay text: a floating read-out centered over the
+        // image cell, Mirrored on the headless path so captures can verify it.
+        if (!st.overlayText.empty()) {
+            save();
+            scissor(vp.x, vp.y, vp.width, vp.height);
+            translate((float)vp.x, (float)vp.y);
+            renderOverlayMessage(st, vp.size());
+            restore();
+        }
+    }
+
+    static void renderOverlayMessage(ViewState& st, const cv::Size& cell) {
+        using namespace cv::v4d::nvg;
+        std::string txt = st.overlayText;
+        if (txt.empty()) return;
+        // Qt darkens the image edge and draws the message center-bottom.
+        float fs = 22.0f;
+        fontSize(fs);
+        fontFace("sans-bold");
+        fillColor(cv::Scalar(255, 255, 0, 255));
+        textAlign(NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        float tx = (float)cell.width * 0.5f;
+        float ty = (float)cell.height * 0.5f;
+        text(tx, ty, txt.c_str(), txt.c_str() + txt.size());
     }
 
     static void renderImage(ViewState& st, const cv::Size& cell, bool verbose) {
@@ -810,7 +908,13 @@ private:
 
         save();
         translate(st.pan.x, st.pan.y);
-        scale(st.zoom, st.zoom);
+        if (st.keepRatio) {
+            scale(st.zoom, st.zoom);
+        } else {
+            // WINDOW_FREERATIO: non-uniform stretch-fill of the cell (x zoom).
+            scale(st.zoom * (float)cell.width  / (float)st.imageW,
+                  st.zoom * (float)cell.height / (float)st.imageH);
+        }
 
         beginPath();
         rect(0.0f, 0.0f, (float)st.imageW, (float)st.imageH);
@@ -818,7 +922,9 @@ private:
                                0.0f, st.imageHandle, 1.0f));
         fill();
 
-        if (verbose && st.zoom >= 8.0f && st.zoom < ViewState::kDeepZoomThreshold) {
+        // Snapping pixel-grid and the deep-zoom RGB readout assume uniform
+        // KEEPRATIO scaling; never draw them under FREERATIO.
+        if (verbose && st.keepRatio && st.zoom >= 8.0f && st.zoom < ViewState::kDeepZoomThreshold) {
             float gridAlpha = std::min(1.0f, (st.zoom - 8.0f) / 8.0f);
             strokeColor(cv::Scalar(128, 128, 128, (int)(gridAlpha * 255)));
             strokeWidth(1.0f / st.zoom);
@@ -837,7 +943,7 @@ private:
         }
 
         restore();
-        if (verbose) drawDeepZoomOverlay(st, cell);
+        if (verbose && st.keepRatio) drawDeepZoomOverlay(st, cell);
     }
 
     static void drawDeepZoomOverlay(ViewState& st, const cv::Size& cell) {
@@ -960,6 +1066,10 @@ private:
         oss << "   |   " << st.imageW << "x" << st.imageH
             << "   |   zoom: " << (int)(st.zoom * 100.0f) << "%";
 
+        if (!st.statusText.empty()) {
+            oss << "   |   " << st.statusText;
+        }
+
         float barH = 28.0f;
         float yTop = (float)cell.height - barH;
         beginPath();
@@ -1033,29 +1143,159 @@ private:
         return (wd->flags & WINDOW_GUI_NORMAL) != 0;
     }
 
+    // Renders one Qt-style SliderInt strip for a window's per-window trackbars,
+    // positioned directly above the 28px status bar (imshow parity). Collapses
+    // to a popup trigger button when the cell is too narrow for sliders.
+    static void drawTrackbarStrip(const std::string& winname, const cv::Rect& vp) {
+        using namespace ImGui;
+        auto bars = WindowManager::instance().getWindowTrackbars(winname);
+        if (bars.empty()) return;
+
+        const float kStatusBarH = 28.0f;
+        const float kStripH = 30.0f;
+        if (vp.width < 240) {
+            // Narrow cell: one small button opens a popup listing the sliders.
+            SetNextWindowPos(ImVec2((float)vp.x, (float)(vp.y + vp.height - kStatusBarH - kStripH)),
+                             ImGuiCond_Always);
+            SetNextWindowSize(ImVec2((float)vp.width, kStripH), ImGuiCond_Always);
+            Begin((std::string("##tbstrip.") + winname).c_str(), nullptr,
+                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
+            if (ImGui::Button("Trackbars...")) {
+                OpenPopup(("##tbstrip_popup." + winname).c_str());
+            }
+            if (BeginPopup(("##tbstrip_popup." + winname).c_str())) {
+                for (auto& b : bars) {
+                    int pos = b.pos;
+                    if (SliderInt((b.name + "##tbstrip." + winname).c_str(), &pos,
+                                  b.min, b.max)) {
+                        WindowManager::instance().updateTrackbarPos(b.name, winname, pos);
+                    }
+                }
+                EndPopup();
+            }
+            End();
+            return;
+        }
+
+        SetNextWindowPos(ImVec2((float)vp.x, (float)(vp.y + vp.height - kStatusBarH - kStripH)),
+                         ImGuiCond_Always);
+        SetNextWindowSize(ImVec2((float)vp.width, kStripH), ImGuiCond_Always);
+        Begin((std::string("##tbstrip.") + winname).c_str(), nullptr,
+              ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+              ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
+        PushID(winname.c_str());
+        float spacing = GetStyle().ItemSpacing.x;
+        float avail = GetContentRegionAvail().x;
+        float perBar = std::max(120.0f, (avail - spacing * (float)(bars.size() - 1)) / (float)bars.size());
+        for (size_t i = 0; i < bars.size(); ++i) {
+            const auto& b = bars[i];
+            int pos = b.pos;
+            SetNextItemWidth(perBar);
+            if (SliderInt((b.name + "##tbstrip").c_str(), &pos, b.min, b.max)) {
+                WindowManager::instance().updateTrackbarPos(b.name, winname, pos);
+            }
+            if (i + 1 < bars.size()) SameLine();
+        }
+        PopID();
+        End();
+    }
+
+    // The "…settings" control panel: global (control-panel) trackbars and
+    // buttons with Qt semantics (push -> cb(-1,ud); check/radio -> 0/1).
+    static void drawControlPanel() {
+        using namespace ImGui;
+        auto& wm = WindowManager::instance();
+        std::vector<Trackbar> bars = wm.getControlTrackbars();
+        std::vector<Button> btns = wm.getControlButtons();
+        if (bars.empty() && btns.empty()) return;
+
+        SetNextWindowSize(ImVec2(360, 0), ImGuiCond_Appearing);
+        Begin("lowgui settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+
+        for (auto& b : bars) {
+            int pos = b.pos;
+            if (SliderInt((b.name + "##panel").c_str(), &pos, b.min, b.max)) {
+                wm.updateTrackbarPos(b.name, "", pos);
+            }
+        }
+        if (!bars.empty() && !btns.empty()) Separator();
+
+        for (const auto& btn : btns) {
+            int type = btn.type & ~QT_NEW_BUTTONBAR;
+            if (type == QT_PUSH_BUTTON) {
+                if (ImGui::Button(btn.name.c_str())) {
+                    wm.setButtonState(btn.name, -1);
+                    if (btn.cb) btn.cb(-1, btn.userdata);
+                }
+            } else if (type == QT_CHECKBOX) {
+                bool checked = btn.state == 1;
+                if (Checkbox(btn.name.c_str(), &checked)) {
+                    int s = checked ? 1 : 0;
+                    wm.setButtonState(btn.name, s);
+                    if (btn.cb) btn.cb(s, btn.userdata);
+                }
+            } else if (type == QT_RADIOBOX) {
+                // Exclusivity is enforced within a buttonbar (same barId): all
+                // siblings go to 0, the selected one to 1; each changed button
+                // fires its callback.
+                bool selected = btn.state == 1;
+                if (RadioButton(btn.name.c_str(), selected)) {
+                    for (const auto& other : btns) {
+                        if (&other == &btn) continue;
+                        if ((other.type & ~QT_NEW_BUTTONBAR) != QT_RADIOBOX) continue;
+                        if (other.barId != btn.barId) continue;
+                        if (other.state != 0) {
+                            wm.setButtonState(other.name, 0);
+                            if (other.cb) other.cb(0, other.userdata);
+                        }
+                    }
+                    wm.setButtonState(btn.name, 1);
+                    if (btn.cb) btn.cb(1, btn.userdata);
+                }
+            }
+        }
+        End();
+    }
+
     // Best-effort copy of the window's current source image to the X clipboard
     // via xclip on Linux. Shared by the Ctrl+C shortcut and the context menu
-    // so they stay identical.
+    // so they stay identical. The PNG is encoded in memory and written straight
+    // to xclip's stdin: no predictable temp file (avoids the symlink race) and
+    // no blocking disk round-trip on the ImGui thread for large images.
     static void copyWindowToClipboard(ViewState& st, const std::string& winname) {
         auto wd = WindowManager::instance().getWindowShared(winname);
         cv::UMat um;
         if (wd) um = wd->sink->frame();
-        if (um.empty()) return;
-        cv::Mat src = um.getMat(cv::ACCESS_READ);
-        std::string tmp = "/tmp/lowgui_clipboard_" + std::to_string(::getpid()) + ".png";
-        if (imwrite(tmp, src)) {
-            std::string cmd = "xclip -selection clipboard -t image/png < \"" + tmp + "\"";
-            FILE* p = popen(cmd.c_str(), "r");
-            if (p) {
-                pclose(p);
-                st.lastImageSaveOk = true;
-                st.lastImageSaveMsg = "Copied image to clipboard.";
-            } else {
-                st.lastImageSaveOk = false;
-                st.lastImageSaveMsg = "Failed to copy image to clipboard (xclip missing?).";
-            }
-            std::remove(tmp.c_str());
+        if (um.empty()) {
+            st.lastImageSaveOk = false;
+            st.lastImageSaveMsg = "No image to copy.";
+            return;
         }
+        cv::Mat src = um.getMat(cv::ACCESS_READ);
+        std::vector<uchar> png;
+        if (!cv::imencode(".png", src, png)) {
+            st.lastImageSaveOk = false;
+            st.lastImageSaveMsg = "Failed to encode image for clipboard.";
+            return;
+        }
+        FILE* p = ::popen("xclip -selection clipboard -t image/png", "w");
+        if (!p) {
+            st.lastImageSaveOk = false;
+            st.lastImageSaveMsg = "Failed to copy image to clipboard (xclip missing?).";
+            return;
+        }
+        size_t written = std::fwrite(png.data(), 1, png.size(), p);
+        int rc = ::pclose(p);
+        if (written != png.size() || rc != 0) {
+            st.lastImageSaveOk = false;
+            st.lastImageSaveMsg = "Failed to copy image to clipboard (xclip error).";
+            return;
+        }
+        st.lastImageSaveOk = true;
+        st.lastImageSaveMsg = "Copied image to clipboard.";
     }
 
     static bool isImageFile(const std::string& name) {
@@ -1144,8 +1384,15 @@ private:
                 zoomAround(st, vp.size(), 1.0f / 1.5f);
             if (IsKeyPressed(ImGuiKey_0) || IsKeyPressed(ImGuiKey_Keypad0))
                 resetZoom(st, vp.size());
-            if (IsKeyPressed(ImGuiKey_P)) resetZoom(st, vp.size());
-            if (IsKeyPressed(ImGuiKey_F)) fitToCell(st, vp.size());
+            if (IsKeyPressed(ImGuiKey_Z)) resetZoom(st, vp.size());
+            // Ctrl+P toggles the control panel (Qt: "Display properties window").
+            if (IsKeyPressed(ImGuiKey_P)) {
+                st.showControlPanel = !st.showControlPanel;
+            }
+            if (IsKeyPressed(ImGuiKey_F)) {
+                if (st.keepRatio) fitToCell(st, vp.size());
+                else fitStretch(st, vp.size());
+            }
             if (IsKeyPressed(ImGuiKey_X)) zoomRegion(st, vp.size());
 
             bool saveViewShortcut = (IsKeyDown(ImGuiKey_LeftShift) ||
@@ -1205,17 +1452,24 @@ private:
                 EndMenu();
             }
             if (BeginMenu("View")) {
-                if (MenuItem("Zoom x1", "Ctrl+P or 0")) resetZoom(st, vp.size());
+                if (MenuItem("Zoom x1", "Ctrl+0 | Ctrl+Z")) resetZoom(st, vp.size());
                 if (MenuItem("Zoom x30 (deep zoom)", "Ctrl+X")) zoomRegion(st, vp.size());
                 Separator();
                 if (MenuItem("Zoom in",  "Ctrl++"))  zoomAround(st, vp.size(), 1.5f);
                 if (MenuItem("Zoom out", "Ctrl+-"))  zoomAround(st, vp.size(), 1.0f / 1.5f);
-                if (MenuItem("Fit to window", "Ctrl+F")) fitToCell(st, vp.size());
+                if (MenuItem("Fit to window", "Ctrl+F")) {
+                    if (st.keepRatio) fitToCell(st, vp.size());
+                    else fitStretch(st, vp.size());
+                }
                 Separator();
                 Checkbox("Status bar",        &st.showStatusBar);
                 Checkbox("Show help overlay", &st.showHelp);
                 Separator();
                 MenuItem("Properties...", nullptr, &st.showProperties);
+                bool panelContent = WindowManager::instance().hasControlPanelContent();
+                if (MenuItem("Display control panel", "Ctrl+P", &st.showControlPanel, panelContent)) {
+                    // toggle happened inside MenuItem
+                }
                 EndMenu();
             }
             if (BeginMenu("Navigate")) {
@@ -1248,7 +1502,7 @@ private:
             if (MenuItem("Panning up",      "Ctrl+Up"))    panFrac(0.0f,  0.05f);
             if (MenuItem("Panning down",    "Ctrl+Down"))  panFrac(0.0f, -0.05f);
             Separator();
-            if (MenuItem("Zoom x1",              "Ctrl+0"))  resetZoom(st, vp.size());
+            if (MenuItem("Zoom x1", "Ctrl+0 | Ctrl+Z"))  resetZoom(st, vp.size());
             if (MenuItem("Zoom x30 (deep zoom)", "Ctrl+X"))  zoomRegion(st, vp.size());
             if (MenuItem("Zoom in",              "Ctrl++"))  zoomAround(st, vp.size(), 1.5f);
             if (MenuItem("Zoom out",             "Ctrl+-"))  zoomAround(st, vp.size(), 1.0f / 1.5f);
@@ -1475,12 +1729,12 @@ private:
             Text("Mouse controls:");
             BulletText("Scroll: zoom in/out (around cursor)");
             BulletText("Left-drag: pan");
-            BulletText("Right-click: reset zoom");
+            BulletText("Right-click: context menu");
             BulletText("Middle-click: zoom to region (deep zoom)");
             Text("Keyboard:");
             BulletText("Ctrl+Arrows: pan by 5%% of viewport");
             BulletText("Ctrl+'+' / Ctrl+'-': zoom in / out");
-            BulletText("Ctrl+0 / Ctrl+P: reset zoom");
+            BulletText("Ctrl+0 / Ctrl+Z: reset zoom");
             BulletText("Ctrl+F: fit to window");
             BulletText("Ctrl+X: deep zoom (x%.0f)", ViewState::kDeepZoomThreshold);
             BulletText("Ctrl+S: save image, Ctrl+Shift+S: save view");
@@ -1501,12 +1755,13 @@ private:
             Separator();
             BulletText("Scroll wheel:       zoom (around cursor)");
             BulletText("Left drag:          pan");
-            BulletText("Right click:        reset zoom (1:1)");
+            BulletText("Right click:        context menu");
             BulletText("Middle click:       deep zoom (x%.0f)", ViewState::kDeepZoomThreshold);
             Separator();
             BulletText("Ctrl+Arrows:        pan by 5%% of viewport");
             BulletText("Ctrl+'+'/'-':       zoom in / out");
-            BulletText("Ctrl+0 / Ctrl+P:    reset zoom");
+            BulletText("Ctrl+0 / Ctrl+Z:    reset zoom");
+            BulletText("Ctrl+P:             control panel");
             BulletText("Ctrl+F:             fit to window");
             BulletText("Ctrl+X:             deep zoom");
             BulletText("Ctrl+S:             save image as...");
@@ -1518,6 +1773,16 @@ private:
             Text("Deep zoom (%.0fx and above) overlays", ViewState::kDeepZoomThreshold);
             Text("R / G / B values inside each pixel.");
             End();
+        }
+
+        // ---------- Control panel (M4) ----------
+        // Per-window trackbar strips go over every cell above the status bar;
+        // the global "…settings" window only when st.showControlPanel is set.
+        for (const auto& e : computeLayout(sz)) {
+            drawTrackbarStrip(e.first, e.second);
+        }
+        if (st.showControlPanel) {
+            drawControlPanel();
         }
         PopFont();
     }

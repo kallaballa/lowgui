@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 lowgui contributors
+// Clean-room reimplementation of OpenCV highgui (see README.md).
 #ifndef OPENCV_LOWGUI_WINDOW_MANAGER_HPP_
 #define OPENCV_LOWGUI_WINDOW_MANAGER_HPP_
 

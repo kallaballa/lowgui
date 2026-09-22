@@ -97,8 +97,14 @@ echo "==> Initrd: $(basename "$INITRD")"
 
 # Copy SSH private key to workspace for CI use
 cp "$SSH_KEY" ./vm-key
-chmod 666 ./vm-key
-chmod 666 "$IMG"
+# The VM key is a root login credential for the test VM: never world-readable.
+# build-vm-image.sh may run under sudo (CI), so hand the artifacts back to the
+# invoking user or actions/cache (running as that user) cannot read them.
+if [ -n "${SUDO_USER:-}" ]; then
+  chown "$SUDO_USER" ./vm-key "$IMG"
+fi
+chmod 600 ./vm-key
+chmod 600 "$IMG"
 
 # 14. Cleanup
 echo "==> Cleaning up..."

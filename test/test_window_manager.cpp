@@ -1,5 +1,7 @@
 #include "test_precomp.hpp"
 #include <opencv2/lowgui/window_manager.hpp>
+#include <thread>
+#include <chrono>
 
 namespace opencv_test {
 namespace {
@@ -188,6 +190,36 @@ TEST_F(WindowManagerTest, destroyWindow_clears_image_buffer) {
 
     cv::UMat dst;
     EXPECT_FALSE(WindowManager::instance().getImage("win1", dst));
+}
+
+TEST_F(WindowManagerTest, waitForWindow_returns_once_a_window_appears) {
+    // L8: waitForWindow previously had no callers (dead API) and createWindow
+    // never notified the condition variable, so a waiter could block forever.
+    std::thread creator([]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        WindowManager::instance().createWindow("late_win", 0);
+    });
+    WindowManager::instance().waitForWindow();
+    creator.join();
+    EXPECT_TRUE(WindowManager::instance().hasWindow("late_win"));
+    WindowManager::instance().destroyAllWindows();
+}
+
+TEST_F(WindowManagerTest, waitForWindow_returns_immediately_when_windows_exist) {
+    // L8 caller: the predicate short-circuits when a window is already present.
+    WindowManager::instance().createWindow("present_win", 0);
+    auto start = std::chrono::steady_clock::now();
+    WindowManager::instance().waitForWindow();
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    EXPECT_LT(elapsed, std::chrono::milliseconds(100));
+}
+
+TEST_F(WindowManagerTest, notifyAll_is_safe_to_call_without_state_change) {
+    // L8 caller: notifyAll broadcasts without touching the window map; a waiter
+    // whose predicate is still false must simply keep waiting, never crash.
+    EXPECT_NO_THROW(WindowManager::instance().notifyAll());
+    WindowManager::instance().createWindow("w", 0);
+    EXPECT_NO_THROW(WindowManager::instance().notifyAll());
 }
 
 } // namespace

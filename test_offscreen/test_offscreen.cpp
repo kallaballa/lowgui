@@ -119,5 +119,30 @@ TEST_F(OffscreenRenderingTest, unsupported_depth_does_not_kill_engine) {
     EXPECT_LT(cv::norm(fb, expected, cv::NORM_INF), 3);
 }
 
+TEST_F(OffscreenRenderingTest, readFramebuffer_returns_newest_settled_frame_after_churn) {
+    // L7 stress: a sustained imshow stream churns the generation counter so a
+    // capture may be skipped or delayed mid-churn; the final waitKey(0) must
+    // capture the last (settled) frame, not a stale churned one.
+    setenv("LOWGUI_HEADLESS_RENDER", "1", 1);
+    Lowgui::namedWindow("churn_win");
+    cv::Mat tmp(32, 32, CV_8UC3);
+    for (int i = 0; i < 200; ++i) {
+        tmp.setTo(cv::Scalar(i & 0xff, 0, (255 - i) & 0xff));
+        Lowgui::imshow("churn_win", tmp);
+    }
+
+    cv::Mat green = cv::Mat::zeros(960, 960, CV_8UC3);
+    green.setTo(cv::Scalar(0, 255, 0));
+    Lowgui::imshow("churn_win", green);
+    Lowgui::waitKey(0);
+
+    cv::UMat fb = Lowgui::readFramebuffer();
+    ASSERT_FALSE(fb.empty());
+    EXPECT_EQ(fb.cols, 960);
+    EXPECT_EQ(fb.rows, 960);
+    cv::Mat expected(960, 960, CV_8UC4, cv::Scalar(0, 255, 0, 255));
+    EXPECT_LT(cv::norm(fb, expected, cv::NORM_INF), 3);
+}
+
 }
 } // namespace opencv_test

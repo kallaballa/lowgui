@@ -37,6 +37,7 @@ if(NOT (TARGET ${the_module}))
     set(OPENCV_TEST_lowgui_SOURCES
       test/test_main.cpp
       test/test_lowgui_api.cpp
+      test/test_lowgui_input.cpp
       test/test_window_manager.cpp
     )
     ocv_add_accuracy_tests()
