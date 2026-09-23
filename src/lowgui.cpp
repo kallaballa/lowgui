@@ -15,6 +15,12 @@
 #include <mutex>
 #include <thread>
 
+// glfwSetWindowShouldClose (used in the native-window close handler) must be
+// declared; v4d/events.hpp includes GLFW in NONE mode, but keep the dependency
+// explicit here.
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+
 namespace cv {
 namespace lowgui {
 namespace detail {
@@ -82,6 +88,20 @@ void engineFn(bool offscreen) {
                                          AllocateFlags::NANOVG | AllocateFlags::IMGUI,
                                          offscreen ? (ConfigFlags::OFFSCREEN | ConfigFlags::DISPLAY_MODE)
                                                    : ConfigFlags::DISPLAY_MODE);
+        // Closing the native window must NOT end the engine (the V4D loop can
+        // only be entered once per process). Intercept the close here: drop all
+        // logical windows (like destroyAllWindows) and transiently wake blocked
+        // waitKey callers, then cancel the pending close so the render loop
+        // keeps running and new windows can be created afterwards. The callback
+        // fires on the display thread during event polling; returning true
+        // suppresses the Window_CLOSE event.
+        gwe::detail::Holder::windowCloseCallback =
+            [](GLFWwindow* w) {
+                WindowManager::instance().destroyAllWindows();
+                cv::lowgui::detail::keyQueue().interrupt();
+                glfwSetWindowShouldClose(w, GLFW_FALSE);
+                return true;
+            };
         V4DPlan::run<LowguiRootPlan>(0);
     } catch (const std::exception& ex) {
         CV_LOG_ERROR(nullptr, "lowgui render engine terminated: " << ex.what());
@@ -93,8 +113,9 @@ void engineFn(bool offscreen) {
     gEngineLoopAlive = false;
     // Wake every thread blocked in waitKey so it returns -1 at shutdown: the
     // key queue (below) plus any parked on the framebuffer-capture or
-    // settled-frame condition variables (otherwise waitKey(0) stalls for the
-    // full 10 s capture timeout after the native window closes).
+    // settled-frame condition variables. Engine death no longer happens on
+    // native-window close (that is handled by the close callback above) and
+    // only occurs via File->Quit, request_finish, or SIGINT/SIGTERM.
     cv::lowgui::detail::keyQueue().notify();
     LowguiRootPlan::notifyWaitersShutdown();
 }
@@ -159,14 +180,17 @@ int waitKeyImpl(int delay, bool lowByte) {
     startEngine(shouldRenderOffscreen());
 
     if (!gEngineLoopAlive.load()) {
-        // One-shot V4D engine (M5): after engine death waitKey* returns -1
-        // immediately. Warn once on the first post-death call so callers that
-        // keep pumping events see an explanation instead of silent -1 speeds.
+        // One-shot V4D engine (M5): engine death no longer happens on
+        // native-window close (that survives, behaving like destroyAllWindows)
+        // and only occurs via File->Quit, request_finish, or SIGINT/SIGTERM.
+        // After death waitKey* returns -1 immediately. Warn once on the first
+        // post-death call so callers that keep pumping events see an
+        // explanation instead of silent -1 speeds.
         static bool warnedPostDeath = false;
         if (!warnedPostDeath) {
             warnedPostDeath = true;
-            CV_LOG_WARNING(nullptr, "lowgui: render engine has terminated; a window "
-                "close ends the render loop permanently, waitKey* returns -1.");
+            CV_LOG_WARNING(nullptr, "lowgui: render engine has terminated; "
+                "waitKey* returns -1.");
         }
         if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         return -1;
@@ -210,6 +234,11 @@ int waitKeyImpl(int delay, bool lowByte) {
             CV_LOG_WARNING(nullptr, "lowgui: timed out waiting for a settled frame");
         }
     }
+    // Clear any transient interrupt left by a native-window close so this
+    // waitKey(*) blocks normally again (the previous waitKey*(-1) already
+    // returned). A close that happens right after this point interrupts the
+    // wait below and wakes this caller.
+    cv::lowgui::detail::keyQueue().clearInterrupt();
     int code = cv::lowgui::detail::keyQueue().wait(delay);
     if (code < 0) return -1;
     return lowByte ? (code & 0xff) : code;

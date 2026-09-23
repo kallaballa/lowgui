@@ -65,7 +65,7 @@ TEST(KeyToCodeTest, function_keys_map_to_x11_keysyms) {
     EXPECT_EQ(keyToCode(K::F12), 65481);
 }
 
-TEST(KeyToCodeTest, numpad_keys_map_to_lowgui_spec_values) {
+TEST(KeyToCodeTest, numpad_keys_map_to_x11_keysyms) {
     EXPECT_EQ(keyToCode(K::KP_0), 65456);
     EXPECT_EQ(keyToCode(K::KP_5), 65461);
     EXPECT_EQ(keyToCode(K::KP_9), 65465);
@@ -75,9 +75,10 @@ TEST(KeyToCodeTest, numpad_keys_map_to_lowgui_spec_values) {
     EXPECT_EQ(keyToCode(K::KP_DECIMAL), 65454);
     // §4.1 (L1) fix: KP_EQUAL is 65469, not 65461 (which collides with KP_5).
     EXPECT_EQ(keyToCode(K::KP_EQUAL), 65469);
-    // Deliberate spec deviation (README): KP_Add/KP_Subtract are swapped vs X11.
-    EXPECT_EQ(keyToCode(K::KP_ADD), 65453);
-    EXPECT_EQ(keyToCode(K::KP_SUBTRACT), 65451);
+    // Real X11 keysyms (GTK parity): XK_KP_Add = 0xffab = 65451,
+    // XK_KP_Subtract = 0xffad = 65453.
+    EXPECT_EQ(keyToCode(K::KP_ADD), 65451);
+    EXPECT_EQ(keyToCode(K::KP_SUBTRACT), 65453);
 }
 
 TEST(KeyToCodeTest, unmapped_keys_return_minus_one) {
@@ -140,6 +141,36 @@ TEST(KeyQueueTest, clear_drops_pending_keys) {
     q.push(2);
     q.clear();
     EXPECT_EQ(q.poll(), -1);
+}
+
+TEST(KeyQueueTest, interrupt_wakes_blocked_waiter_and_returns_minus_one) {
+    KeyQueue q;
+    std::thread interrupter([&q]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        q.interrupt();
+    });
+    int code = q.wait(0);
+    interrupter.join();
+    EXPECT_EQ(code, -1);
+    // The interrupt is transient (unlike notify): the queue still delivers keys.
+    q.push(42);
+    EXPECT_EQ(q.poll(), 42);
+}
+
+TEST(KeyQueueTest, clearInterrupt_restores_blocking) {
+    KeyQueue q;
+    q.interrupt();
+    q.clearInterrupt();
+    // A cleared interrupt must not leave the queue permanently unblocked: a
+    // bounded wait now actually waits for the timeout instead of returning
+    // immediately.
+    auto start = std::chrono::steady_clock::now();
+    EXPECT_EQ(q.wait(50), -1);
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    EXPECT_GE(elapsed, std::chrono::milliseconds(40));
+    // Pushed keys are still delivered after an interrupt + clear cycle.
+    q.push(7);
+    EXPECT_EQ(q.wait(0), 7);
 }
 
 // ---------- Trackbar registry (§7 / §3 M4) ----------

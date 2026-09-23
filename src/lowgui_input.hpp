@@ -19,8 +19,10 @@ namespace detail {
  * (pushes via the root plan's key node) and waitKey/waitKeyEx (polls/blocks).
  *
  * waitKey(0) blocks on wait(0) until a key arrives or the queue is closed; the
- * queue is closed when the render engine dies or the native window is closed so
- * waitKey(0) unblocks at shutdown instead of hanging.
+ * queue is closed when the render engine dies so waitKey(0) unblocks at
+ * shutdown instead of hanging. Closing the native window is a transient
+ * interrupt instead (see interrupt()/clearInterrupt()): waiters wake once, but
+ * the queue keeps delivering keys afterwards so rendering can resume.
  */
 class KeyQueue {
 public:
@@ -41,11 +43,12 @@ public:
         return code;
     }
 
-    // Waits for a key, the timeout (timeoutMs > 0), or queue close. timeoutMs
-    // of 0 blocks until a key or close. Returns the key code or -1.
+    // Waits for a key, the timeout (timeoutMs > 0), queue close, or a transient
+    // interrupt. timeoutMs of 0 blocks until a key, close, or interrupt.
+    // Returns the key code or -1.
     int wait(int timeoutMs) {
         std::unique_lock<std::mutex> lock(mtx_);
-        auto ready = [this] { return closed_ || !keys_.empty(); };
+        auto ready = [this] { return closed_ || interrupt_ || !keys_.empty(); };
         if (timeoutMs <= 0) {
             cv_.wait(lock, ready);
         } else {
@@ -57,12 +60,33 @@ public:
         return code;
     }
 
-    // Closes the queue and wakes any blocked waiter (engine death / native
-    // window close). Once closed every wait returns immediately.
+    // Closes the queue and wakes any blocked waiter (engine death). Once closed
+    // every wait returns immediately.
     void notify() {
         {
             std::lock_guard<std::mutex> lock(mtx_);
             closed_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    // Transiently wakes any blocked waiter (native-window close). Unlike
+    // notify() this does NOT close the queue: the interrupt is cleared by the
+    // caller (clearInterrupt) before the next wait so waitKey* blocks normally
+    // again, and pushed keys keep being delivered.
+    void interrupt() {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            interrupt_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    // Clears a pending transient interrupt so a subsequent wait blocks again.
+    void clearInterrupt() {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            interrupt_ = false;
         }
         cv_.notify_all();
     }
@@ -80,6 +104,7 @@ private:
     std::mutex mtx_;
     std::condition_variable cv_;
     bool closed_ = false;
+    bool interrupt_ = false;
 };
 
 //! Singleton accessor shared by the render worker and the waitKey API.
@@ -182,8 +207,8 @@ inline int keyToCode(cv::v4d::event::Keyboard::Key k) {
         case K::KP_9: return 65465;
         case K::KP_DIVIDE:    return 65455;
         case K::KP_MULTIPLY:  return 65450;
-        case K::KP_SUBTRACT:  return 65451;
-        case K::KP_ADD:       return 65453;
+        case K::KP_SUBTRACT:  return 65453;
+        case K::KP_ADD:       return 65451;
         case K::KP_ENTER:     return 65421;
         case K::KP_DECIMAL:   return 65454;
         case K::KP_EQUAL:     return 65469;
