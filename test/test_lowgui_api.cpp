@@ -1,14 +1,11 @@
 #include "test_precomp.hpp"
 #include <opencv2/lowgui/lowgui.hpp>
-#include "lowgui_root_plan.hpp"
 #include <thread>
 #include <chrono>
 
 namespace opencv_test {
 namespace {
 using namespace cv::lowgui;
-
-using KeyboardKey = cv::v4d::event::Keyboard::Key;
 
 class LowguiApiTest : public testing::Test {
 protected:
@@ -150,7 +147,10 @@ TEST_F(LowguiApiTest, waitKey_returns_promptly_with_zero_delay) {
     int key = Lowgui::waitKey(0);
     auto elapsed = std::chrono::steady_clock::now() - start;
     EXPECT_EQ(key, -1);
-    EXPECT_LT(elapsed, std::chrono::seconds(5));
+    // No window exists in this fixture, so waitKey(0) returns via the early
+    // windowCount()==0 path (no engine, no blocking): it must return fast, not
+    // just "eventually". 1s is generous for a pure mutex-lock path.
+    EXPECT_LT(elapsed, std::chrono::seconds(1));
 }
 
 TEST_F(LowguiApiTest, waitKeyEx_returns_promptly_with_zero_delay) {
@@ -158,7 +158,7 @@ TEST_F(LowguiApiTest, waitKeyEx_returns_promptly_with_zero_delay) {
     int key = Lowgui::waitKeyEx(0);
     auto elapsed = std::chrono::steady_clock::now() - start;
     EXPECT_EQ(key, -1);
-    EXPECT_LT(elapsed, std::chrono::seconds(5));
+    EXPECT_LT(elapsed, std::chrono::seconds(1));
 }
 
 TEST_F(LowguiApiTest, waitKey_with_positive_delay_returns_minus_one) {
@@ -188,6 +188,66 @@ TEST_F(LowguiApiTest, namedWindow_then_imshow_does_not_crash) {
     Lowgui::imshow("crash_win", cv::Mat::zeros(10, 10, CV_8UC3));
     Lowgui::imshow("crash_win", cv::Mat::zeros(10, 10, CV_8UC4));
     Lowgui::destroyAllWindows();
+}
+
+TEST_F(LowguiApiTest, getMouseWheelDelta_returns_signed_delta) {
+    EXPECT_EQ(Lowgui::getMouseWheelDelta(120 << 16), 120);
+    EXPECT_EQ(Lowgui::getMouseWheelDelta(1 << 16), 1);
+    const int neg = static_cast<int>(static_cast<int16_t>(-120)) << 16;
+    EXPECT_EQ(Lowgui::getMouseWheelDelta(neg), -120);
+    EXPECT_EQ(Lowgui::getMouseWheelDelta(0), 0);
+}
+
+TEST_F(LowguiApiTest, window_properties_roundtrip) {
+    Lowgui::namedWindow("prop_win");
+
+    Lowgui::setWindowProperty("prop_win", cv::lowgui::WND_PROP_AUTOSIZE,
+                              cv::lowgui::WINDOW_AUTOSIZE);
+    EXPECT_EQ(Lowgui::getWindowProperty("prop_win", cv::lowgui::WND_PROP_AUTOSIZE),
+              cv::lowgui::WINDOW_AUTOSIZE);
+    Lowgui::setWindowProperty("prop_win", cv::lowgui::WND_PROP_AUTOSIZE,
+                              cv::lowgui::WINDOW_NORMAL);
+    EXPECT_EQ(Lowgui::getWindowProperty("prop_win", cv::lowgui::WND_PROP_AUTOSIZE),
+              cv::lowgui::WINDOW_NORMAL);
+
+    Lowgui::setWindowProperty("prop_win", cv::lowgui::WND_PROP_FULLSCREEN,
+                              cv::lowgui::WINDOW_FULLSCREEN);
+    EXPECT_EQ(Lowgui::getWindowProperty("prop_win", cv::lowgui::WND_PROP_FULLSCREEN),
+              cv::lowgui::WINDOW_FULLSCREEN);
+    Lowgui::setWindowProperty("prop_win", cv::lowgui::WND_PROP_FULLSCREEN,
+                              cv::lowgui::WINDOW_NORMAL);
+    EXPECT_EQ(Lowgui::getWindowProperty("prop_win", cv::lowgui::WND_PROP_FULLSCREEN),
+              cv::lowgui::WINDOW_NORMAL);
+
+    Lowgui::setWindowProperty("prop_win", cv::lowgui::WND_PROP_VISIBLE, 0);
+    EXPECT_EQ(Lowgui::getWindowProperty("prop_win", cv::lowgui::WND_PROP_VISIBLE), 0);
+    Lowgui::setWindowProperty("prop_win", cv::lowgui::WND_PROP_VISIBLE, 1);
+    EXPECT_EQ(Lowgui::getWindowProperty("prop_win", cv::lowgui::WND_PROP_VISIBLE), 1);
+
+    // No-op (Qt parity): the getters must not invent values for unsupported props.
+    EXPECT_EQ(Lowgui::getWindowProperty("prop_win", cv::lowgui::WND_PROP_OPENGL), -1);
+    EXPECT_EQ(Lowgui::getWindowProperty("prop_win", cv::lowgui::WND_PROP_TOPMOST), -1);
+    EXPECT_EQ(Lowgui::getWindowProperty("prop_win", cv::lowgui::WND_PROP_VSYNC), -1);
+    Lowgui::destroyAllWindows();
+}
+
+TEST_F(LowguiApiTest, getWindowProperty_missing_window_returns_minus_one) {
+    EXPECT_EQ(Lowgui::getWindowProperty("missing", cv::lowgui::WND_PROP_FULLSCREEN), -1);
+    EXPECT_EQ(Lowgui::getWindowProperty("missing", cv::lowgui::WND_PROP_ASPECT_RATIO), -1);
+}
+
+TEST_F(LowguiApiTest, getWindowImageRect_empty_before_first_render) {
+    Lowgui::namedWindow("rect_win");
+    // No engine has run, so the native-window size was never published.
+    EXPECT_EQ(Lowgui::getWindowImageRect("rect_win"), cv::Rect());
+    Lowgui::destroyAllWindows();
+}
+
+TEST_F(LowguiApiTest, readFramebuffer_empty_without_active_window) {
+    // No window, no engine, no armed capture: must not serve a stale frame.
+    Lowgui::destroyAllWindows();
+    cv::UMat fb = Lowgui::readFramebuffer();
+    EXPECT_TRUE(fb.empty());
 }
 
 } // namespace

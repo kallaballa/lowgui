@@ -2,6 +2,7 @@
 // Copyright (c) 2026 lowgui contributors
 // Clean-room reimplementation of OpenCV highgui (see README.md).
 #include <opencv2/lowgui/window_manager.hpp>
+#include "lowgui_engine.hpp"
 #include <vector>
 #include <algorithm>
 
@@ -29,6 +30,10 @@ void WindowManager::destroyWindow(const std::string& name) {
     std::lock_guard<std::mutex> lock(mtx_);
     windows_.erase(name);
     windowOrder_.erase(std::remove(windowOrder_.begin(), windowOrder_.end(), name), windowOrder_.end());
+    // Never leave the active window pointing at a destroyed window: a later
+    // waitKey/readFramebuffer would otherwise target a dead name and silently
+    // skip starting the engine for the real active window (test-suite leak).
+    if (activeWindow_ == name) activeWindow_.clear();
     generation_.fetch_add(1, std::memory_order_relaxed);
     cv_.notify_all();
 }
@@ -43,6 +48,7 @@ void WindowManager::destroyAllWindows() {
     controlTrackbars_.clear();
     controlButtons_.clear();
     nextBarId_ = 0;
+    activeWindow_.clear();
     generation_.fetch_add(1, std::memory_order_relaxed);
     cv_.notify_all();
 }
@@ -465,6 +471,35 @@ void WindowManager::setMessage(const std::string& name, const std::string& text,
     std::lock_guard<std::mutex> lock(wd->sink->mtx);
     if (overlay) wd->overlayMsg.set(text, delayms);
     else wd->statusMsg.set(text, delayms);
+}
+
+bool WindowManager::isEngineRunning(const std::string& name) const {
+    auto wd = getWindowShared(name);
+    if (!wd) return false;
+    return wd->engineRunning.load(std::memory_order_acquire);
+}
+
+KeyQueue* WindowManager::getKeyQueue(const std::string& name) const {
+    auto wd = getWindowShared(name);
+    if (!wd) return nullptr;
+    return wd->keyQueue.get();
+}
+
+void WindowManager::setActiveWindow(const std::string& name) {
+    std::lock_guard<std::mutex> lock(mtx_);
+    activeWindow_ = name;
+}
+
+std::string WindowManager::getActiveWindow() const {
+    std::lock_guard<std::mutex> lock(mtx_);
+    return activeWindow_;
+}
+
+void WindowManager::setWindowNativeSize(const std::string& name, int w, int h) {
+    auto wd = getWindowShared(name);
+    if (!wd) return;
+    wd->winW.store(w, std::memory_order_relaxed);
+    wd->winH.store(h, std::memory_order_relaxed);
 }
 
 }

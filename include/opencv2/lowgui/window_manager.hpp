@@ -7,6 +7,7 @@
 #include <opencv2/core.hpp>
 #include <opencv2/lowgui/sink_source.hpp>
 #include <opencv2/lowgui/lowgui.hpp>
+#include "lowgui_input.hpp"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -15,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -69,7 +71,6 @@ struct TransientMsg {
 };
 
 struct WindowData {
-    // Unique-per-instance high bits for the contentSerial cache (see below).
     static std::uint64_t nextInstanceId() {
         static std::atomic<std::uint64_t> counter{0};
         return counter.fetch_add(1, std::memory_order_relaxed);
@@ -78,48 +79,43 @@ struct WindowData {
     std::string name;
     std::string title;
     int flags;
-    // Per-window transport: imshow pushes into it, the render loop reads the
-    // latest frame from it. Its mutex also guards viewport/title/userViewport
-    // and the per-window registry below (mouse callback, trackbars, properties,
-    // transient messages). Shared so the SinkSource outlives concurrent Source
-    // consumers.
     std::shared_ptr<SinkSource> sink;
-    // Monotonically increased on every pushImage; the render loop compares it
-    // against the last uploaded value to skip re-uploading unchanged content.
-    // Initialized to a value unique to this WindowData instance (high 32 bits)
-    // so a destroyed-and-recreated window can never collide with a stale cache.
     std::atomic<std::uint64_t> contentSerial{nextInstanceId() << 32};
-    // Latest image size staged by the render loop (0,0 before the first frame).
-    // Used by the layout (WINDOW_AUTOSIZE cells) and getWindowImageRect.
     std::atomic<int> imageW{0};
     std::atomic<int> imageH{0};
+    // Latest native-window size set by the render loop (0,0 before the first
+    // frame). Used by getWindowImageRect in the per-native-window architecture.
+    std::atomic<int> winW{0};
+    std::atomic<int> winH{0};
     cv::Rect viewport;
-    // When set (via resizeWindow/moveWindow) the viewport is used as-is
-    // instead of being overridden by the auto grid layout.
     bool userViewport = false;
 
-    // ---------- Per-window registry (guarded by sink->mtx) ----------
     MouseCallback mouseCb = nullptr;
     void* mouseUserdata = nullptr;
     std::map<std::string, Trackbar> trackbars;
-    int propAutosize = 0;      // 0 / WINDOW_AUTOSIZE
-    bool propKeepRatio = true; // true = WINDOW_KEEPRATIO (letterbox), false = WINDOW_FREERATIO
-    int propFullscreen = 0;    // WINDOW_NORMAL / WINDOW_FULLSCREEN
-    int propVisible = 1;       // 1 / 0
+    int propAutosize = 0;
+    bool propKeepRatio = true;
+    int propFullscreen = 0;
+    int propVisible = 1;
     TransientMsg statusMsg;
     TransientMsg overlayMsg;
 
-    // Delete copy/move operations because SinkSource is non-copyable/non-movable
+    std::unique_ptr<KeyQueue> keyQueue;
+
+    mutable std::mutex engineMtx;
+    std::thread engineThread;
+    std::atomic<bool> engineRunning{false};
+
     WindowData() = default;
     WindowData(const WindowData&) = delete;
     WindowData& operator=(const WindowData&) = delete;
     WindowData(WindowData&&) = delete;
     WindowData& operator=(WindowData&&) = delete;
 
-    // Constructor for easy creation
     WindowData(std::string n, std::string t, int f)
         : name(std::move(n)), title(std::move(t)), flags(f),
-          sink(std::make_shared<SinkSource>()), viewport() {
+          sink(std::make_shared<SinkSource>()), viewport(),
+          keyQueue(std::make_unique<KeyQueue>()) {
         propAutosize = (f & WINDOW_AUTOSIZE) ? WINDOW_AUTOSIZE : 0;
         propKeepRatio = true;
         propVisible = 1;
@@ -144,6 +140,7 @@ class WindowManager {
     std::map<std::string, Trackbar> controlTrackbars_;
     std::vector<Button> controlButtons_;
     int nextBarId_ = 0;
+    std::string activeWindow_;
 
 public:
     static WindowManager& instance();
@@ -209,6 +206,22 @@ public:
 
     // ---------- Transient messages ----------
     void setMessage(const std::string& name, const std::string& text, int delayms, bool overlay);
+
+    // ---------- Engine lifecycle (implemented in lowgui_engine.cpp) ----------
+    // startEngineForWindow / stopEngineForWindow are free functions in
+    // lowgui_engine.cpp (the WindowManager intentionally does not own engine
+    // threads; storing-and-joining a thread handle here duplicated that logic
+    // and regressed the sequential-engine lifecycle).
+    bool isEngineRunning(const std::string& name) const;
+    KeyQueue* getKeyQueue(const std::string& name) const;
+
+    // ---------- Active window (for per-window key routing) --------------------
+    void setActiveWindow(const std::string& name);
+    std::string getActiveWindow() const;
+
+    // Called by the render plan each frame to publish the latest native-window
+    // size so API-thread callers (getWindowImageRect) see an up-to-date rect.
+    void setWindowNativeSize(const std::string& name, int w, int h);
 };
 
 } // namespace detail

@@ -89,8 +89,8 @@ typedef void (*ButtonCallback)(int state, void* userdata);
  *
  * Every window behaves like a Qt `imshow` window: keys are delivered to
  * `waitKey`/`waitKeyEx`, mouse callbacks can be installed, trackbars and buttons
- * can be attached, and window properties follow the Qt semantics. The windows are
- * arranged in a single native (GLFW) window grid.
+ * can be attached, and window properties follow the Qt semantics. Each logical
+ * window is presented in its own native (GLFW) window.
  */
 class CV_EXPORTS Lowgui {
 public:
@@ -237,7 +237,7 @@ public:
      */
     static double getWindowProperty(const std::string& winname, int prop_id);
 
-    /** @brief Returns the rectangle of the image rendering area within the native grid.
+    /** @brief Returns the rectangle of the image rendering area within the native window.
      */
     static cv::Rect getWindowImageRect(const std::string& winname);
 

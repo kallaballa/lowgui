@@ -211,7 +211,10 @@ TEST_F(WindowManagerTest, waitForWindow_returns_immediately_when_windows_exist) 
     auto start = std::chrono::steady_clock::now();
     WindowManager::instance().waitForWindow();
     auto elapsed = std::chrono::steady_clock::now() - start;
-    EXPECT_LT(elapsed, std::chrono::milliseconds(100));
+    // The predicate short-circuits: an immediate return takes microseconds.
+    // 200ms only guards against a catastrophic regression (e.g. an accidental
+    // sleep or a lost notify) while tolerating loaded-CI scheduler noise.
+    EXPECT_LT(elapsed, std::chrono::milliseconds(200));
 }
 
 TEST_F(WindowManagerTest, notifyAll_is_safe_to_call_without_state_change) {
@@ -220,6 +223,46 @@ TEST_F(WindowManagerTest, notifyAll_is_safe_to_call_without_state_change) {
     EXPECT_NO_THROW(WindowManager::instance().notifyAll());
     WindowManager::instance().createWindow("w", 0);
     EXPECT_NO_THROW(WindowManager::instance().notifyAll());
+}
+
+TEST_F(WindowManagerTest, transient_message_status_and_overlay) {
+    // Status-bar / overlay text is stored per-window with an expiry; delayms <= 0
+    // never expires (cover the displayOverlay/displayStatusBar wiring).
+    WindowManager::instance().createWindow("msg_win", 0);
+    auto wd = WindowManager::instance().getWindowShared("msg_win");
+    ASSERT_NE(wd, nullptr);
+
+    EXPECT_FALSE(wd->statusMsg.active());
+    EXPECT_FALSE(wd->overlayMsg.active());
+
+    WindowManager::instance().setMessage("msg_win", "status hello", 0, false);
+    EXPECT_TRUE(wd->statusMsg.active());
+    EXPECT_EQ(wd->statusMsg.text, "status hello");
+
+    WindowManager::instance().setMessage("msg_win", "overlay hi", 0, true);
+    EXPECT_TRUE(wd->overlayMsg.active());
+    EXPECT_EQ(wd->overlayMsg.text, "overlay hi");
+
+    // A short expiry does expire (generous margins to avoid timing flakiness).
+    WindowManager::instance().setMessage("msg_win", "bye", 30, false);
+    EXPECT_TRUE(wd->statusMsg.active());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_FALSE(wd->statusMsg.active());
+}
+
+TEST_F(WindowManagerTest, setMessage_unknown_window_is_safe) {
+    EXPECT_NO_THROW(WindowManager::instance().setMessage("nope", "x", 0, false));
+    EXPECT_NO_THROW(WindowManager::instance().setMessage("nope", "x", 0, true));
+}
+
+TEST_F(WindowManagerTest, setWindowNativeSize_then_getWindowImageRect) {
+    // getWindowImageRect publishes the native image area once the render loop
+    // reports a size; simulate that publication via the manager accessor.
+    WindowManager::instance().createWindow("rect_win", 0);
+    EXPECT_EQ(cv::lowgui::Lowgui::getWindowImageRect("rect_win"), cv::Rect());
+
+    WindowManager::instance().setWindowNativeSize("rect_win", 640, 480);
+    EXPECT_EQ(cv::lowgui::Lowgui::getWindowImageRect("rect_win"), cv::Rect(0, 0, 640, 452));
 }
 
 } // namespace

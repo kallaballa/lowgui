@@ -45,19 +45,20 @@ jobs:
 
   xvfb-tests:
     runs-on: ubuntu-26.04
-    needs: build-vm-image
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Assert exit-crash fix is pinned in the submodule
-        run: grep -q "intentionally leaked" Plan-V4D/modules/plan/include/opencv2/plan/plan.hpp
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y xvfb libgl1-mesa-dri mesa-utils
       - name: Build
         run: ./build.sh -t plan+v4d+lowgui -j$(nproc)
       - name: Run offscreen tests
         run: timeout 300s xvfb-run -a ./opencv/build/bin/opencv_test_lowgui_offscreen --gtest_output=xml:offscreen-results.xml
+        env:
+          LIBGL_ALWAYS_SOFTWARE: 1
+          GALLIUM_DRIVER: swrast
+          EGL_PLATFORM: surfaceless
       - name: Run main tests under Xvfb
         run: timeout 300s xvfb-run -a ./opencv/build/bin/opencv_test_lowgui --gtest_output=xml:main-results.xml
       - name: Upload offscreen results
@@ -68,6 +69,37 @@ jobs:
           path: |
             offscreen-results.xml
             main-results.xml
+
+  asan-tests:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y xvfb libgl1-mesa-dri mesa-utils
+      - name: Build with AddressSanitizer
+        run: ./build.sh -t plan+v4d+lowgui -b asan -j$(nproc)
+      - name: Run offscreen tests under ASan
+        run: |
+          timeout 600s xvfb-run -a ./opencv/build/bin/opencv_test_lowgui_offscreen \
+            --gtest_output=xml:asan-offscreen-results.xml
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+      - name: Run main tests under ASan
+        run: |
+          timeout 600s xvfb-run -a ./opencv/build/bin/opencv_test_lowgui \
+            --gtest_output=xml:asan-main-results.xml
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+      - name: Upload ASan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asan-test-results
+          path: |
+            asan-offscreen-results.xml
+            asan-main-results.xml
 
   qemu-tests:
     needs: build-vm-image

@@ -19,7 +19,7 @@ A clean-room reimplementation of the OpenCV `highgui` module image viewer on top
 
 ## Overview
 
-`lowgui` is a drop-in replacement for OpenCV's highgui image viewing: programs that call `namedWindow` / `imshow` / `waitKey` keep working, but the Qt backend is replaced by a single native (GLFW) window that lays every viewer window out in a grid and renders it with NanoVG through the Plan-V4D runtime. Each logical window keeps its own zoom/pan state, status bar, trackbars and mouse callbacks, so the interactive highgui/Qt experience is preserved.
+`lowgui` is a drop-in replacement for OpenCV's highgui image viewing: programs that call `namedWindow` / `imshow` / `waitKey` keep working, but the Qt backend is replaced by a per-window native (GLFW) presentation rendered with NanoVG through the Plan-V4D runtime. Each logical highgui window becomes its own visible native GLFW window, rendered by its own Plan instance running in its own dedicated thread. Each logical window keeps its own zoom/pan state, status bar, trackbars and mouse callbacks, so the interactive highgui/Qt experience is preserved.
 
 ## Features
 
@@ -28,7 +28,7 @@ A clean-room reimplementation of the OpenCV `highgui` module image viewer on top
 - **Trackbars & buttons** — `createTrackbar` with per-window and global control-panel registries, `get/setTrackbarPos`, `setTrackbarMin/Max`; Qt push buttons, checkboxes and radioboxes via `createButton`
 - **Window properties** — `setWindowProperty` / `getWindowProperty` for FULLSCREEN, AUTOSIZE, ASPECT_RATIO and VISIBLE, `getWindowImageRect`, plus transient `displayOverlay` / `displayStatusBar` messages
 - **Interactive viewer** — scroll-wheel zoom around the cursor, left-drag pan, middle-click deep zoom, right-click context menu with Qt's 11 actions, status bar with pixel readout, deep-zoom RGB overlays, open/save dialogs, help overlay and full-screen toggle
-- **Rendering** — NanoVG with fit-to-viewport scaling, multiple windows arranged in a grid, texture re-upload only when an image changes, and a headless/offscreen path backed by `readFramebuffer()`
+- **Rendering** — NanoVG with fit-to-viewport scaling, each window in its own native frame, texture re-upload only when an image changes, and a headless/offscreen path backed by `readFramebuffer()`
 - **Image handling** — same depth/channel conversions as highgui (1/3/4 channels; 8U plus 8S/16U/16S/32F/64F); unsupported input is skipped with a logged warning
 
 ## Building
@@ -93,16 +93,16 @@ A larger interactive demo lives in `samples/lowgui_demo.cpp`.
 ## Architecture
 
 1. **WindowManager** (`window_manager.hpp`) — thread-safe singleton managing window state (name, flags, title, viewport, image buffer, mouse callback, trackbars, properties, transient messages) plus the global control panel. Windows are owned via `shared_ptr` so concurrent accessors never dangle.
-2. **LowguiRootPlan** (`src/lowgui_root_plan.hpp`) — the root Plan-V4D plan behind the long-lived render engine. Each frame it reads the current window set, arranges the grid, and draws via NanoVG; it dispatches mouse/key edges, owns the offscreen framebuffer snapshots, and runs the ImGui menu bar, dialogs, shortcuts and context menu.
+2. **LowguiWindowPlan** (`src/lowgui_window_plan.hpp`) — each window runs its own `LowguiWindowPlan` in a dedicated thread, with its own `V4D::init` call (`src/lowgui_engine.cpp`) and its own native GLFW window. Each plan draws its window with NanoVG, dispatches mouse/key edges, owns its per-window offscreen framebuffer capture, and runs the ImGui menu bar, dialogs, shortcuts and context menu.
 3. **SinkSource** (`sink_source.hpp`) — a thread-safe buffer that images can be pushed into from any thread and converted into a `cv::v4d::Source`. The per-window image buffers are the primary path; `SinkSource` is the extension point.
-4. **Lowgui API** (`lowgui.hpp` / `src/lowgui.cpp`) — public highgui-style functions. `waitKey` starts (once per process) the render/event-loop engine and coordinates key waits and framebuffer snapshots against it. Key codes are mapped by `src/lowgui_input.hpp`.
+4. **Lowgui API** (`lowgui.hpp` / `src/lowgui.cpp`) — public highgui-style functions. `waitKey` starts (per window) the render/event-loop engine and coordinates key waits and framebuffer snapshots against the active window's plan. Key codes are mapped by `src/lowgui_input.hpp`.
 
 ## Testing
 
 ### Unit tests (no display server required)
 
 ```bash
-./opencv/build/bin/opencv_test_lowgui --gtest_filter=-*Rendering*
+./opencv/build/bin/opencv_test_lowgui
 ```
 
 The `waitKey`-based API tests run with zero windows, so they never start the real-display engine.
@@ -114,13 +114,7 @@ LIBGL_ALWAYS_SOFTWARE=1 ./opencv/build/bin/opencv_test_lowgui_offscreen
 # or: xvfb-run -a ./opencv/build/bin/opencv_test_lowgui_offscreen
 ```
 
-The offscreen suite forces the headless engine, renders images through the `readFramebuffer()` snapshot path and asserts on the captured pixels and `waitKey(0)` semantics. Input is injected via `gwe::push(...)`.
-
-### Full rendering tests (legacy) under Xvfb
-
-```bash
-xvfb-run -a ./opencv/build/bin/opencv_test_lowgui --gtest_filter=*Rendering*
-```
+The offscreen suite forces the headless engine, renders images through the `readFramebuffer()` snapshot path and asserts on the captured pixels and `waitKey(0)` semantics. Input is injected both directly (active-window key queue) and end-to-end via `gwe::detail::push(...)` so the plan's key/mouse dispatch (`keyToCode`, `setMouseCallback`) is covered.
 
 ### Full system tests (QEMU)
 
@@ -131,7 +125,7 @@ CI (GitHub Actions) runs the QEMU workflow plus an Xvfb workflow on push/PR to `
 ## Compatibility & limitations
 
 - Key codes match Qt's X11 values, including the numpad (`KP_Add`/`KP_Subtract` at 65451/65453). `Ctrl`-prefixed combinations are suppressed from `waitKey` since ImGui consumes them for shortcuts, mirroring Qt. Modifiers are tracked for mouse-callback flags but never delivered as key codes.
-- There is exactly one native (GLFW) window hosting the viewer grid, and the V4D render loop can only be started once per process. Closing the native window behaves like `destroyAllWindows`: the engine keeps running, `waitKey*` returns `-1` while no windows exist, and creating new windows resumes rendering. `destroyWindow` / `destroyAllWindows` without closing the native window are safe. The engine only ends via File→Quit, `request_finish`, or `SIGINT`/`SIGTERM`.
+- Each logical highgui window gets its own native GLFW window, and the V4D render loop is started once per window (in its own dedicated thread). Closing a native window behaves like `destroyWindow` for that window; `waitKey*` returns `-1` while no windows exist, and creating new windows resumes rendering. `destroyWindow` / `destroyAllWindows` without closing the native window are safe. Engines only end via File→Quit, `request_finish`, or `SIGINT`/`SIGTERM`.
 - `imshow` with an unsupported depth (`CV_32S` etc.) or channel count is skipped for that window with a logged warning rather than crashing the engine.
 - `WINDOW_GUI_NORMAL` windows get no context menu; "Save view as…" currently saves the window's *source* image.
 - In offscreen/headless mode input arrives only through injected events (`gwe::push(...)`); there is no keyboard source.

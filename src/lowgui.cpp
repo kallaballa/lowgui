@@ -4,8 +4,8 @@
 #include <opencv2/lowgui/lowgui.hpp>
 #include <opencv2/lowgui/window_manager.hpp>
 #include "lowgui_input.hpp"
-#include "lowgui_root_plan.hpp"
-#include <opencv2/v4d/v4d.hpp>
+#include "lowgui_engine.hpp"
+#include "lowgui_window_plan.hpp"
 #include <opencv2/core/utils/logger.hpp>
 #include <atomic>
 #include <chrono>
@@ -16,8 +16,7 @@
 #include <thread>
 
 // glfwSetWindowShouldClose (used in the native-window close handler) must be
-// declared; v4d/events.hpp includes GLFW in NONE mode, but keep the dependency
-// explicit here.
+// declared; v4d/events.hpp includes GLFW in NONE mode.
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
@@ -25,128 +24,90 @@ namespace cv {
 namespace lowgui {
 namespace detail {
 
-cv::UMat LowguiRootPlan::s_framebuffer;
-std::mutex LowguiRootPlan::s_fbMutex;
-std::atomic<long> LowguiRootPlan::s_frameCount{0};
-std::mutex LowguiRootPlan::s_captureMtx;
-std::condition_variable LowguiRootPlan::s_captureCv;
-long LowguiRootPlan::s_captureRequested = 0;
-long LowguiRootPlan::s_captureDone = 0;
-std::atomic<std::uint64_t> LowguiRootPlan::s_frameDrawStartGen{0};
-std::atomic<std::uint64_t> LowguiRootPlan::s_frameDrawEndGen{0};
-std::uint64_t LowguiRootPlan::s_captureRequestedGen = 0;
-std::atomic<std::uint64_t> LowguiRootPlan::s_frameDrawDoneGen{0};
-std::mutex LowguiRootPlan::s_frameDrawMtx;
-std::condition_variable LowguiRootPlan::s_frameDrawCv;
+int waitKeyImpl(int delay, bool lowByte) {
+    static const int kCaptureTimeoutMs = 10000;
 
-std::map<std::string, LowguiRootPlan::ViewState> LowguiRootPlan::s_viewStates;
-std::string LowguiRootPlan::s_activeWindow;
-std::atomic<bool> LowguiRootPlan::s_headless{false};
-std::atomic<int> LowguiRootPlan::s_winW{0};
-std::atomic<int> LowguiRootPlan::s_winH{0};
-
-}
-
-}
-}
-
-using namespace cv::lowgui;
-using namespace cv::lowgui::detail;
-using namespace cv::v4d;
-
-namespace {
-
-// The V4D run loop can only be entered once per process (finish/rendezvous
-// state is process-global), so lowgui starts a single long-lived render
-// engine on the first waitKey call and keeps it running. waitKey controls
-// sequencing and framebuffer snapshots instead of the loop lifecycle.
-
-std::mutex gEngineMtx;
-std::thread gEngineThread;
-bool gEngineThreadStarted = false;
-std::atomic<bool> gEngineLoopAlive{false};
-std::atomic<bool> gEngineModeOffscreen{false};
-bool gEngineShutdownRegistered = false;
-
-bool hasNativeDisplay() {
-    const char* d = std::getenv("DISPLAY");
-    const char* w = std::getenv("WAYLAND_DISPLAY");
-    return (d && d[0]) != 0 || (w && w[0]) != 0;
-}
-
-bool shouldRenderOffscreen() {
-    if (std::getenv("LOWGUI_HEADLESS_RENDER")) return true;
-    if (std::getenv("LOWGUI_FORCE_OFFSCREEN")) return true;
-    return !hasNativeDisplay();
-}
-
-void engineFn(bool offscreen) {
-    try {
-        LowguiRootPlan::setHeadless(offscreen);
-        cv::Rect viewport(0, 0, 960, 960);
-        cv::Ptr<V4D> runtime = V4D::init(viewport, "lowgui",
-                                         AllocateFlags::NANOVG | AllocateFlags::IMGUI,
-                                         offscreen ? (ConfigFlags::OFFSCREEN | ConfigFlags::DISPLAY_MODE)
-                                                   : ConfigFlags::DISPLAY_MODE);
-        // Closing the native window must NOT end the engine (the V4D loop can
-        // only be entered once per process). Intercept the close here: drop all
-        // logical windows (like destroyAllWindows) and transiently wake blocked
-        // waitKey callers, then cancel the pending close so the render loop
-        // keeps running and new windows can be created afterwards. The callback
-        // fires on the display thread during event polling; returning true
-        // suppresses the Window_CLOSE event.
-        gwe::detail::Holder::windowCloseCallback =
-            [](GLFWwindow* w) {
-                WindowManager::instance().destroyAllWindows();
-                cv::lowgui::detail::keyQueue().interrupt();
-                glfwSetWindowShouldClose(w, GLFW_FALSE);
-                return true;
-            };
-        V4DPlan::run<LowguiRootPlan>(0);
-    } catch (const std::exception& ex) {
-        CV_LOG_ERROR(nullptr, "lowgui render engine terminated: " << ex.what());
-    } catch (...) {
-        CV_LOG_ERROR(nullptr, "lowgui render engine terminated with unknown error.");
+    if (WindowManager::instance().windowCount() == 0) {
+        if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        return -1;
     }
-    // Engine is dead: mark it before waking waiters so any thread that races in
-    // between sees the post-death -1 path instead of re-entering the waits.
-    gEngineLoopAlive = false;
-    // Wake every thread blocked in waitKey so it returns -1 at shutdown: the
-    // key queue (below) plus any parked on the framebuffer-capture or
-    // settled-frame condition variables. Engine death no longer happens on
-    // native-window close (that is handled by the close callback above) and
-    // only occurs via File->Quit, request_finish, or SIGINT/SIGTERM.
-    cv::lowgui::detail::keyQueue().notify();
-    LowguiRootPlan::notifyWaitersShutdown();
-}
 
-void startEngine(bool offscreen) {
-    {
-        std::lock_guard<std::mutex> lock(gEngineMtx);
-        if (gEngineThreadStarted) return;
-        gEngineThreadStarted = true;
-        gEngineModeOffscreen = offscreen;
-        gEngineLoopAlive = true;
-        gEngineThread = std::thread(engineFn, offscreen);
+    std::string active = WindowManager::instance().getActiveWindow();
+    if (active.empty()) {
+        auto names = WindowManager::instance().getWindowNames();
+        if (!names.empty()) {
+            active = names.front();
+            WindowManager::instance().setActiveWindow(active);
+        }
     }
-    if (!gEngineShutdownRegistered) {
-        gEngineShutdownRegistered = true;
-        std::atexit([]() {
-            std::thread t;
-            {
-                std::lock_guard<std::mutex> lock(gEngineMtx);
-                if (!gEngineThreadStarted) return;
-                gEngineThreadStarted = false;
-                t = std::move(gEngineThread);
+
+    if (active.empty()) {
+        if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        return -1;
+    }
+
+    auto wd = WindowManager::instance().getWindowShared(active);
+    if (!wd) {
+        if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        return -1;
+    }
+
+    startEngineForWindow(active);
+
+    if (!wd->engineRunning.load(std::memory_order_acquire)) {
+        static bool warnedPostDeath = false;
+        if (!warnedPostDeath) {
+            warnedPostDeath = true;
+            CV_LOG_WARNING(nullptr, "lowgui: render engine for window '" << active
+                << "' has terminated; waitKey* returns -1.");
+        }
+        if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        return -1;
+    }
+
+    const bool headlessCapture = std::getenv("LOWGUI_HEADLESS_RENDER") != nullptr;
+
+    if (shouldRenderOffscreen()) {
+        if (headlessCapture) {
+            // Route the capture through the active window's own plan instance.
+            // waitForPlanForWindow absorbs the engine-startup race: on the first
+            // waitKey(0) the plan is constructed on its engine thread shortly
+            // after startEngineForWindow spawns it, so let it register first.
+            LowguiWindowPlan* plan = LowguiWindowPlan::waitForPlanForWindow(
+                active, kCaptureTimeoutMs);
+            if (plan) {
+                plan->requestFrameCapture(WindowManager::instance().generation());
+                if (!plan->waitForFrameCapture(0, kCaptureTimeoutMs) && delay == 0) {
+                    CV_LOG_WARNING(nullptr,
+                        "lowgui: timed out waiting for framebuffer capture");
+                }
             }
-            if (gEngineLoopAlive.load()) cv::v4d::request_finish();
-            if (t.joinable()) t.join();
-            cv::lowgui::detail::keyQueue().notify();
-        });
+        }
+        if (delay > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        int code = wd->keyQueue->poll();
+        if (code >= 0) return lowByte ? (code & 0xff) : code;
+        return -1;
     }
+
+    while (wd->engineRunning.load(std::memory_order_acquire)) {
+        int code = wd->keyQueue->wait(delay);
+        if (code >= 0) return lowByte ? (code & 0xff) : code;
+        std::string newActive = WindowManager::instance().getActiveWindow();
+        if (newActive != active) {
+            active = newActive;
+            wd = WindowManager::instance().getWindowShared(active);
+            if (!wd) { if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay)); return -1; }
+            continue;
+        }
+        if (delay > 0) return -1;
+    }
+    return -1;
 }
 
-} // namespace
+} // namespace detail
+
+using namespace cv::lowgui::detail;
 
 void Lowgui::namedWindow(const std::string& winname, int flags) {
     WindowManager::instance().createWindow(winname, flags);
@@ -156,112 +117,34 @@ void Lowgui::imshow(const std::string& winname, InputArray mat) {
     if (mat.empty()) return;
     auto& wm = WindowManager::instance();
     if (!wm.hasWindow(winname)) {
-        // Matches highgui: imshow auto-creates missing windows (AUTOSIZE).
         wm.createWindow(winname, WINDOW_AUTOSIZE);
     }
     cv::UMat umat = mat.getUMat();
     wm.pushImage(winname, umat);
+    cv::lowgui::detail::startEngineForWindow(winname);
 }
-
-namespace {
-int waitKeyImpl(int delay, bool lowByte) {
-    static const int kCaptureTimeoutMs = 10000;
-
-    // Load-bearing early return (L7): the main-unit binary runs its waitKey API
-    // tests with zero windows so waitKey never starts the real-display engine
-    // (which would need a display server and would hang waitKey(0)). Do NOT
-    // remove; the offscreen binary (opencv_test_lowgui_offscreen) exercises the
-    // windowed paths. CI additionally wraps the binaries in `timeout 300s`.
-    if (WindowManager::instance().windowCount() == 0) {
-        if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-        return -1;
-    }
-
-    startEngine(shouldRenderOffscreen());
-
-    if (!gEngineLoopAlive.load()) {
-        // One-shot V4D engine (M5): engine death no longer happens on
-        // native-window close (that survives, behaving like destroyAllWindows)
-        // and only occurs via File->Quit, request_finish, or SIGINT/SIGTERM.
-        // After death waitKey* returns -1 immediately. Warn once on the first
-        // post-death call so callers that keep pumping events see an
-        // explanation instead of silent -1 speeds.
-        static bool warnedPostDeath = false;
-        if (!warnedPostDeath) {
-            warnedPostDeath = true;
-            CV_LOG_WARNING(nullptr, "lowgui: render engine has terminated; "
-                "waitKey* returns -1.");
-        }
-        if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-        return -1;
-    }
-
-    const bool headlessCapture = std::getenv("LOWGUI_HEADLESS_RENDER") != nullptr;
-
-    if (gEngineModeOffscreen.load()) {
-        // Offscreen (LOWGUI_HEADLESS_RENDER / LOWGUI_FORCE_OFFSCREEN / no display):
-        // drain the key queue FIRST, independent of the capture wait (M7). A
-        // sustained image stream churns the generation so a settled capture may
-        // not arrive within the timeout; that must never hold up key delivery.
-        // Only when no key is pending do we run the capture sequencing (so the
-        // tests' imshow -> waitKey(0) -> readFramebuffer contract still holds).
-        LowguiRootPlan::clearFramebuffer();
-        int code = cv::lowgui::detail::keyQueue().poll();
-        if (code >= 0) return lowByte ? (code & 0xff) : code;
-        if (headlessCapture) {
-            long id = LowguiRootPlan::requestFrameCapture(WindowManager::instance().generation());
-            if (!LowguiRootPlan::waitForFrameCapture(id, kCaptureTimeoutMs)) {
-                // Only the blocking caller (waitKey(0)) needs to know: a timed
-                // poll under capture churn would otherwise spam the warning.
-                if (delay == 0) {
-                    CV_LOG_WARNING(nullptr, "lowgui: timed out waiting for framebuffer capture");
-                }
-            }
-        }
-        if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-        code = cv::lowgui::detail::keyQueue().poll();
-        if (code < 0) return -1;
-        return lowByte ? (code & 0xff) : code;
-    }
-
-    // Real display: present one settled frame before waiting for a key so the
-    // caller's most recent imshow is visible. waitKey(0) blocks until a key
-    // press or the engine/window is closed.
-    LowguiRootPlan::clearFramebuffer();
-    if (delay == 0) {
-        std::uint64_t req = WindowManager::instance().generation();
-        if (!LowguiRootPlan::waitForSettledFrame(req, kCaptureTimeoutMs)) {
-            CV_LOG_WARNING(nullptr, "lowgui: timed out waiting for a settled frame");
-        }
-    }
-    // Clear any transient interrupt left by a native-window close so this
-    // waitKey(*) blocks normally again (the previous waitKey*(-1) already
-    // returned). A close that happens right after this point interrupts the
-    // wait below and wakes this caller.
-    cv::lowgui::detail::keyQueue().clearInterrupt();
-    int code = cv::lowgui::detail::keyQueue().wait(delay);
-    if (code < 0) return -1;
-    return lowByte ? (code & 0xff) : code;
-}
-} // namespace
 
 int Lowgui::waitKey(int delay) {
-    return waitKeyImpl(delay, true);
+    return cv::lowgui::detail::waitKeyImpl(delay, true);
 }
 
 int Lowgui::pollKey() {
-    return waitKeyImpl(1, true);
+    return cv::lowgui::detail::waitKeyImpl(1, true);
 }
 
 int Lowgui::waitKeyEx(int delay) {
-    return waitKeyImpl(delay, false);
+    return cv::lowgui::detail::waitKeyImpl(delay, false);
 }
 
 void Lowgui::destroyWindow(const std::string& winname) {
+    cv::lowgui::detail::stopEngineForWindow(winname);
     WindowManager::instance().destroyWindow(winname);
 }
 
 void Lowgui::destroyAllWindows() {
+    auto names = WindowManager::instance().getWindowNames();
+    for (const auto& name : names)
+        cv::lowgui::detail::stopEngineForWindow(name);
     WindowManager::instance().destroyAllWindows();
 }
 
@@ -298,7 +181,7 @@ void Lowgui::setWindowTitle(const std::string& winname, const std::string& title
 }
 
 cv::UMat Lowgui::readFramebuffer() {
-    return detail::LowguiRootPlan::getFramebuffer();
+    return cv::lowgui::detail::LowguiWindowPlan::readActiveFramebuffer();
 }
 
 void Lowgui::setMouseCallback(const std::string& winname, MouseCallback onMouse,
@@ -307,9 +190,6 @@ void Lowgui::setMouseCallback(const std::string& winname, MouseCallback onMouse,
 }
 
 int Lowgui::getMouseWheelDelta(int flags) {
-    // Wheel delta is packed in the upper 16 bits of the flags as a multiple of
-    // 120 per notch (see handleInput). Recover it as a signed value so negative
-    // (up/away) scrolling comes through as a negative delta.
     return (int)(int16_t)((flags >> 16) & 0xffff);
 }
 
@@ -343,9 +223,6 @@ int Lowgui::createButton(const std::string& bar_name, ButtonCallback on_change,
 }
 
 void Lowgui::setWindowProperty(const std::string& winname, int prop_id, int prop_value) {
-    // FULLSCREEN is applied by the render worker reading wd->propFullscreen and
-    // writing V4D::Keys::FULLSCREEN on every frame (whole native window), so no
-    // extra settled-frame notify is needed here.
     WindowManager::instance().setProperty(winname, prop_id, prop_value);
 }
 
@@ -354,10 +231,13 @@ double Lowgui::getWindowProperty(const std::string& winname, int prop_id) {
 }
 
 cv::Rect Lowgui::getWindowImageRect(const std::string& winname) {
-    cv::Size sz = detail::LowguiRootPlan::windowSize();
-    if (sz.width <= 0 || sz.height <= 0) sz = cv::Size(960, 960);
-    cv::Rect r = detail::LowguiRootPlan::viewportFor(winname, sz);
-    return r.width > 0 ? r : cv::Rect();
+    auto wd = WindowManager::instance().getWindowShared(winname);
+    if (!wd) return cv::Rect();
+    int w = wd->winW.load(std::memory_order_relaxed);
+    int h = wd->winH.load(std::memory_order_relaxed);
+    if (w > 0 && h > 28)
+        return cv::Rect(0, 0, w, h - 28);
+    return cv::Rect();
 }
 
 void Lowgui::displayOverlay(const std::string& winname, const std::string& text, int delayms) {
@@ -367,3 +247,6 @@ void Lowgui::displayOverlay(const std::string& winname, const std::string& text,
 void Lowgui::displayStatusBar(const std::string& winname, const std::string& text, int delayms) {
     WindowManager::instance().setMessage(winname, text, delayms, false);
 }
+
+} // namespace lowgui
+} // namespace cv

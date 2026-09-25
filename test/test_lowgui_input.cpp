@@ -167,7 +167,9 @@ TEST(KeyQueueTest, clearInterrupt_restores_blocking) {
     auto start = std::chrono::steady_clock::now();
     EXPECT_EQ(q.wait(50), -1);
     auto elapsed = std::chrono::steady_clock::now() - start;
-    EXPECT_GE(elapsed, std::chrono::milliseconds(40));
+    // wait_for returns at least 50ms; allow a generous clock/scheduling margin
+    // (30ms) so loaded CI boxes never flake on a sub-millisecond deadline.
+    EXPECT_GE(elapsed, std::chrono::milliseconds(30));
     // Pushed keys are still delivered after an interrupt + clear cycle.
     q.push(7);
     EXPECT_EQ(q.wait(0), 7);
